@@ -39,7 +39,7 @@ pub struct EventChannel {
 ///
 /// [`Node`]: crate::node::Node
 #[derive(Debug, Clone)]
-pub struct EventPublisher {
+pub(crate) struct EventPublisher {
     tx: broadcast::Sender<NodeEventInfo>,
 }
 
@@ -59,7 +59,7 @@ impl EventChannel {
     }
 
     /// Creates a new [`EventPublisher`].
-    pub fn publisher(&self) -> EventPublisher {
+    pub(crate) fn publisher(&self) -> EventPublisher {
         EventPublisher {
             tx: self.tx.clone(),
         }

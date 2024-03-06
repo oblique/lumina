@@ -18,18 +18,22 @@ use libp2p::identity::Keypair;
 use libp2p::swarm::NetworkInfo;
 use libp2p::{Multiaddr, PeerId};
 use tokio::select;
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
-use crate::daser::{Daser, DaserArgs, DaserError};
+use crate::daser::{Daser, DaserArgs};
 use crate::events::{EventChannel, EventSubscriber};
 use crate::executor::spawn;
-use crate::p2p::{P2p, P2pArgs, P2pError};
-use crate::peer_tracker::PeerTrackerInfo;
+use crate::p2p::{P2p, P2pArgs};
 use crate::store::{SamplingMetadata, Store, StoreError};
-use crate::syncer::{Syncer, SyncerArgs, SyncerError, SyncingInfo};
+use crate::syncer::{Syncer, SyncerArgs};
 
-type Result<T, E = NodeError> = std::result::Result<T, E>;
+pub use crate::p2p::{HeaderExError, P2pError};
+pub use crate::peer_tracker::PeerTrackerInfo;
+pub use crate::syncer::{SyncerError, SyncingInfo};
+
+pub type Result<T, E = NodeError> = std::result::Result<T, E>;
 
 /// Representation of all the errors that can occur when interacting with the [`Node`].
 #[derive(Debug, thiserror::Error)]
@@ -45,10 +49,6 @@ pub enum NodeError {
     /// An error propagated from the [`Store`] module.
     #[error(transparent)]
     Store(#[from] StoreError),
-
-    /// An error propagated from the [`Daser`] module.
-    #[error(transparent)]
-    Daser(#[from] DaserError),
 }
 
 /// Node conifguration.
@@ -82,7 +82,7 @@ where
     p2p: Arc<P2p>,
     store: Arc<S>,
     syncer: Arc<Syncer<S>>,
-    _daser: Arc<Daser>,
+    daser: Arc<Daser>,
     tasks_cancellation_token: CancellationToken,
 }
 
@@ -145,9 +145,16 @@ where
             p2p,
             store,
             syncer,
-            _daser: daser,
+            daser,
             tasks_cancellation_token,
         })
+    }
+
+    pub fn stop(&self) {
+        self.syncer.stop();
+        self.daser.stop();
+        self.p2p.stop();
+        // TODO: Implement join
     }
 
     /// Returns a new `EventSubscriber`.
@@ -160,11 +167,14 @@ where
         self.p2p.local_peer_id()
     }
 
-    /// Get current [`PeerTracker`] info.
-    ///
-    /// [`PeerTracker`]: crate::peer_tracker::PeerTracker
+    /// Get current [`PeerTrackerInfo`].
     pub fn peer_tracker_info(&self) -> PeerTrackerInfo {
         self.p2p.peer_tracker_info().clone()
+    }
+
+    /// Get [`PeerTrackerInfo`] watcher.
+    pub fn peer_tracker_info_watcher(&self) -> watch::Receiver<PeerTrackerInfo> {
+        self.p2p.peer_tracker_info_watcher()
     }
 
     /// Wait until the node is connected to at least 1 peer.

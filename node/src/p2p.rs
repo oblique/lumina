@@ -163,6 +163,7 @@ impl From<oneshot::error::RecvError> for P2pError {
 /// Component responsible for the peer to peer networking handling.
 #[derive(Debug)]
 pub struct P2p {
+    cancellation_token: CancellationToken,
     cmd_tx: mpsc::Sender<P2pCmd>,
     header_sub_watcher: watch::Receiver<Option<ExtendedHeader>>,
     peer_tracker_info_watcher: watch::Receiver<PeerTrackerInfo>,
@@ -237,13 +238,22 @@ impl P2p {
         let peer_tracker = Arc::new(PeerTracker::new());
         let peer_tracker_info_watcher = peer_tracker.info_watcher();
 
-        let mut worker = Worker::new(args, cmd_rx, header_sub_tx, peer_tracker)?;
+        let cancellation_token = CancellationToken::new();
+
+        let mut worker = Worker::new(
+            args,
+            cancellation_token.child_token(),
+            cmd_rx,
+            header_sub_tx,
+            peer_tracker,
+        )?;
 
         spawn(async move {
             worker.run().await;
         });
 
         Ok(P2p {
+            cancellation_token,
             cmd_tx,
             header_sub_watcher: header_sub_rx,
             peer_tracker_info_watcher,
@@ -252,14 +262,16 @@ impl P2p {
     }
 
     /// Creates and starts a new mocked p2p handler.
-    #[cfg(any(test, feature = "test-utils"))]
+    #[cfg(test)]
     pub fn mocked() -> (Self, crate::test_utils::MockP2pHandle) {
         let (cmd_tx, cmd_rx) = mpsc::channel(16);
         let (header_sub_tx, header_sub_rx) = watch::channel(None);
         let (peer_tracker_tx, peer_tracker_rx) = watch::channel(PeerTrackerInfo::default());
+        let cancellation_token = CancellationToken::new();
 
         let p2p = P2p {
             cmd_tx: cmd_tx.clone(),
+            cancellation_token,
             header_sub_watcher: header_sub_rx,
             peer_tracker_info_watcher: peer_tracker_rx,
             local_peer_id: PeerId::random(),
@@ -275,10 +287,10 @@ impl P2p {
         (p2p, handle)
     }
 
-    /// Stop the [`P2p`].
-    pub async fn stop(&self) -> Result<()> {
-        // TODO
-        Ok(())
+    /// Stop the worker.
+    pub fn stop(&self) {
+        // Singal the Worker to stop.
+        self.cancellation_token.cancel();
     }
 
     /// Local peer ID on the p2p network.
@@ -511,6 +523,12 @@ impl P2p {
     }
 }
 
+impl Drop for P2p {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
 /// Our network behaviour.
 #[derive(NetworkBehaviour)]
 struct Behaviour<B, S>
@@ -532,6 +550,7 @@ where
     B: Blockstore + 'static,
     S: Store + 'static,
 {
+    cancellation_token: CancellationToken,
     swarm: Swarm<Behaviour<B, S>>,
     header_sub_topic_hash: TopicHash,
     bad_encoding_fraud_sub_topic: TopicHash,
@@ -550,6 +569,7 @@ where
 {
     fn new(
         args: P2pArgs<B, S>,
+        cancellation_token: CancellationToken,
         cmd_rx: mpsc::Receiver<P2pCmd>,
         header_sub_watcher: watch::Sender<Option<ExtendedHeader>>,
         peer_tracker: Arc<PeerTracker>,
@@ -603,6 +623,7 @@ where
         }
 
         Ok(Worker {
+            cancellation_token,
             cmd_rx,
             swarm,
             bad_encoding_fraud_sub_topic: bad_encoding_fraud_sub_topic.hash(),
@@ -625,6 +646,7 @@ where
 
         loop {
             select! {
+                _ = self.cancellation_token.cancelled() => break,
                 _ = report_interval.tick() => {
                     self.report();
                 }

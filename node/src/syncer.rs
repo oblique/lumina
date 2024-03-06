@@ -25,48 +25,29 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, info_span, instrument, warn, Instrument};
 
 use crate::executor::{sleep, spawn, spawn_cancellable, Interval};
+use crate::node::{NodeError, Result};
 use crate::p2p::{P2p, P2pError};
-use crate::store::{Store, StoreError};
+use crate::store::Store;
 use crate::utils::OneshotSenderExt;
-
-type Result<T, E = SyncerError> = std::result::Result<T, E>;
 
 const MAX_HEADERS_IN_BATCH: u64 = 512;
 const TRY_INIT_BACKOFF_MAX_INTERVAL: Duration = Duration::from_secs(60);
 
-/// Representation of all the errors that can occur when interacting with the [`Syncer`].
+/// Errors that are related to syncer.
 #[derive(Debug, thiserror::Error)]
 pub enum SyncerError {
-    /// An error propagated from the [`P2p`] module.
-    #[error(transparent)]
-    P2p(#[from] P2pError),
-
-    /// An error propagated from the [`Store`] module.
-    #[error(transparent)]
-    Store(#[from] StoreError),
-
-    /// An error propagated from the [`celestia_types`].
-    #[error(transparent)]
-    Celestia(#[from] celestia_types::Error),
-
     /// The worker has died.
-    #[error("Worker died")]
+    #[error("Syncer worker died")]
     WorkerDied,
 
-    /// Channel has been closed unexpectedly.
-    #[error("Channel closed unexpectedly")]
-    ChannelClosedUnexpectedly,
-}
-
-impl From<oneshot::error::RecvError> for SyncerError {
-    fn from(_value: oneshot::error::RecvError) -> Self {
-        SyncerError::ChannelClosedUnexpectedly
-    }
+    /// Response channel has been closed unexpectedly.
+    #[error("Syncer response channel closed unexpectedly")]
+    ResponseChannelClosed,
 }
 
 /// Component responsible for synchronizing block headers from the network.
 #[derive(Debug)]
-pub struct Syncer<S>
+pub(crate) struct Syncer<S>
 where
     S: Store + 'static,
 {
@@ -76,16 +57,16 @@ where
 }
 
 /// Arguments used to configure the [`Syncer`].
-pub struct SyncerArgs<S>
+pub(crate) struct SyncerArgs<S>
 where
     S: Store + 'static,
 {
     /// Hash of the genesis block.
-    pub genesis_hash: Option<Hash>,
+    pub(crate) genesis_hash: Option<Hash>,
     /// Handler for the peer to peer messaging.
-    pub p2p: Arc<P2p>,
+    pub(crate) p2p: Arc<P2p>,
     /// Headers storage.
-    pub store: Arc<S>,
+    pub(crate) store: Arc<S>,
 }
 
 #[derive(Debug)]
@@ -109,7 +90,7 @@ where
     S: Store,
 {
     /// Create and start the [`Syncer`].
-    pub fn start(args: SyncerArgs<S>) -> Result<Self> {
+    pub(crate) fn start(args: SyncerArgs<S>) -> Result<Self> {
         let cancellation_token = CancellationToken::new();
         let (cmd_tx, cmd_rx) = mpsc::channel(16);
         let mut worker = Worker::new(args, cancellation_token.child_token(), cmd_rx)?;
@@ -125,10 +106,9 @@ where
         })
     }
 
-    /// Stop the [`Syncer`].
-    pub fn stop(&self) {
+    /// Stop the worker.
+    pub(crate) fn stop(&self) {
         // Singal the Worker to stop.
-        // TODO: Should we wait for the Worker to stop?
         self.cancellation_token.cancel();
     }
 
@@ -136,7 +116,7 @@ where
         self.cmd_tx
             .send(cmd)
             .await
-            .map_err(|_| SyncerError::WorkerDied)
+            .map_err(|_| NodeError::Syncer(SyncerError::WorkerDied))
     }
 
     /// Get the current synchronization status.
@@ -144,13 +124,14 @@ where
     /// # Errors
     ///
     /// This function will return an error if the [`Syncer`] has been stopped.
-    pub async fn info(&self) -> Result<SyncingInfo> {
+    pub(crate) async fn info(&self) -> Result<SyncingInfo> {
         let (tx, rx) = oneshot::channel();
 
         self.send_command(SyncerCmd::GetInfo { respond_to: tx })
             .await?;
 
-        Ok(rx.await?)
+        rx.await
+            .map_err(|_| NodeError::Syncer(SyncerError::ResponseChannelClosed))
     }
 }
 
@@ -159,7 +140,7 @@ where
     S: Store,
 {
     fn drop(&mut self) {
-        self.cancellation_token.cancel();
+        self.stop();
     }
 }
 
@@ -768,7 +749,7 @@ mod tests {
         sleep(Duration::from_millis(1)).await;
         assert!(matches!(
             syncer.info().await.unwrap_err(),
-            SyncerError::WorkerDied
+            NodeError::Syncer(SyncerError::WorkerDied)
         ));
     }
 

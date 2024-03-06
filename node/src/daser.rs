@@ -44,9 +44,10 @@ use web_time::{Duration, Instant};
 
 use crate::events::{EventPublisher, NodeEvent};
 use crate::executor::spawn;
+use crate::node::Result;
 use crate::p2p::shwap::sample_cid;
 use crate::p2p::{P2p, P2pError};
-use crate::store::{SamplingStatus, Store, StoreError};
+use crate::store::{SamplingStatus, Store};
 use crate::utils::FusedReusableBoxFuture;
 
 const MAX_SAMPLES_NEEDED: usize = 16;
@@ -55,41 +56,27 @@ const HOUR: u64 = 60 * 60;
 const DAY: u64 = 24 * HOUR;
 const SAMPLING_WINDOW: Duration = Duration::from_secs(30 * DAY);
 
-type Result<T, E = DaserError> = std::result::Result<T, E>;
-
-/// Representation of all the errors that can occur when interacting with the [`Daser`].
-#[derive(Debug, thiserror::Error)]
-pub enum DaserError {
-    /// An error propagated from the [`P2p`] module.
-    #[error(transparent)]
-    P2p(#[from] P2pError),
-
-    /// An error propagated from the [`Store`] module.
-    #[error(transparent)]
-    Store(#[from] StoreError),
-}
-
 /// Component responsible for data availability sampling of blocks from the network.
-pub struct Daser {
+pub(crate) struct Daser {
     cancellation_token: CancellationToken,
 }
 
 /// Arguments used to configure the [`Daser`].
-pub struct DaserArgs<S>
+pub(crate) struct DaserArgs<S>
 where
     S: Store,
 {
     /// Handler for the peer to peer messaging.
-    pub p2p: Arc<P2p>,
+    pub(crate) p2p: Arc<P2p>,
     /// Headers storage.
-    pub store: Arc<S>,
+    pub(crate) store: Arc<S>,
     /// Event publisher.
-    pub event_pub: EventPublisher,
+    pub(crate) event_pub: EventPublisher,
 }
 
 impl Daser {
     /// Create and start the [`Daser`].
-    pub fn start<S>(args: DaserArgs<S>) -> Result<Self>
+    pub(crate) fn start<S>(args: DaserArgs<S>) -> Result<Self>
     where
         S: Store + 'static,
     {
@@ -110,17 +97,16 @@ impl Daser {
         Ok(Daser { cancellation_token })
     }
 
-    /// Stop the [`Daser`].
-    pub fn stop(&self) {
+    /// Stop the worker.
+    pub(crate) fn stop(&self) {
         // Singal the Worker to stop.
-        // TODO: Should we wait for the Worker to stop?
         self.cancellation_token.cancel();
     }
 }
 
 impl Drop for Daser {
     fn drop(&mut self) {
-        self.cancellation_token.cancel();
+        self.stop();
     }
 }
 
