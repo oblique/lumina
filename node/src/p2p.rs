@@ -47,6 +47,7 @@ use libp2p::{
     },
     Multiaddr, PeerId,
 };
+use shwap::{get_block_number, ShwapBehaviour};
 use smallvec::SmallVec;
 use tendermint_proto::Protobuf;
 use tokio::select;
@@ -664,7 +665,7 @@ where
 {
     connection_control: connection_control::Behaviour,
     autonat: autonat::Behaviour,
-    bitswap: beetswap::Behaviour<MAX_MH_SIZE, B>,
+    shwap: ShwapBehaviour<B>,
     ping: ping::Behaviour,
     identify: identify::Behaviour,
     header_ex: HeaderExBehaviour<S>,
@@ -726,11 +727,8 @@ where
         let gossipsub = init_gossipsub(&args, [&header_sub_topic, &bad_encoding_fraud_sub_topic])?;
 
         let kademlia = init_kademlia(&args)?;
-        let bitswap = init_bitswap(
-            args.blockstore.clone(),
-            args.store.clone(),
-            &args.network_id,
-        )?;
+
+        let shwap = ShwapBehaviour::new(args.blockstore.clone(), &args.network_id)?;
 
         let header_ex = HeaderExBehaviour::new(HeaderExConfig {
             network_id: &args.network_id,
@@ -741,7 +739,7 @@ where
         let behaviour = Behaviour {
             connection_control,
             autonat,
-            bitswap,
+            shwap,
             ping,
             identify,
             gossipsub,
@@ -872,7 +870,7 @@ where
 
         for query_id in cancelled {
             self.bitswap_queries.remove(&query_id);
-            self.swarm.behaviour_mut().bitswap.cancel(query_id);
+            self.swarm.behaviour_mut().shwap.cancel(query_id);
         }
     }
 
@@ -926,7 +924,7 @@ where
                 BehaviourEvent::Identify(ev) => self.on_identify_event(ev).await?,
                 BehaviourEvent::Gossipsub(ev) => self.on_gossip_sub_event(ev).await,
                 BehaviourEvent::Kademlia(ev) => self.on_kademlia_event(ev).await?,
-                BehaviourEvent::Bitswap(ev) => self.on_bitswap_event(ev).await,
+                BehaviourEvent::Shwap(ev) => self.on_shwap_event(ev).await,
                 BehaviourEvent::Ping(ev) => self.on_ping_event(ev).await,
                 BehaviourEvent::Autonat(_)
                 | BehaviourEvent::ConnectionControl(_)
@@ -998,7 +996,7 @@ where
                 }
             }
             P2pCmd::GetShwapCid { cid, respond_to } => {
-                self.on_get_shwap_cid(cid, respond_to);
+                self.on_get_shwap_cid(cid, respond_to).await;
             }
             P2pCmd::GetNetworkCompromisedToken { respond_to } => {
                 respond_to.maybe_send(self.network_compromised_token.clone())
@@ -1097,14 +1095,22 @@ where
     }
 
     #[instrument(level = "trace", skip_all)]
-    fn on_get_shwap_cid(&mut self, cid: Cid, respond_to: OneshotResultSender<Vec<u8>, P2pError>) {
+    async fn on_get_shwap_cid(
+        &mut self,
+        cid: Cid,
+        respond_to: OneshotResultSender<Vec<u8>, P2pError>,
+    ) {
         trace!("Requesting CID {cid} from bitswap");
-        let query_id = self.swarm.behaviour_mut().bitswap.get(&cid);
+
+        let block_number = get_block_number(&cid).expect("todo");
+        let dah = self.store.get_by_height(block_number).await.unwrap().dah;
+
+        let query_id = self.swarm.behaviour_mut().shwap.get(&cid, &dah);
         self.bitswap_queries.insert(query_id, respond_to);
     }
 
     #[instrument(level = "trace", skip(self))]
-    async fn on_bitswap_event(&mut self, ev: beetswap::Event) {
+    async fn on_shwap_event(&mut self, ev: beetswap::Event) {
         match ev {
             beetswap::Event::GetQueryResponse { query_id, data } => {
                 if let Some(respond_to) = self.bitswap_queries.remove(&query_id) {
@@ -1360,22 +1366,4 @@ where
     }
 
     Ok(kademlia)
-}
-
-fn init_bitswap<B, S>(
-    blockstore: Arc<B>,
-    store: Arc<S>,
-    network_id: &str,
-) -> Result<beetswap::Behaviour<MAX_MH_SIZE, B>>
-where
-    B: Blockstore + 'static,
-    S: Store + 'static,
-{
-    let protocol_prefix = celestia_protocol_id(network_id, "shwap");
-
-    Ok(beetswap::Behaviour::builder(blockstore)
-        .protocol_prefix(protocol_prefix.as_ref())?
-        .register_multihasher(ShwapMultihasher::new(store))
-        .client_set_send_dont_have(false)
-        .build())
 }

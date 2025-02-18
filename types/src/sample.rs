@@ -282,10 +282,10 @@ impl SampleId {
     }
 }
 
-impl<const S: usize> TryFrom<CidGeneric<S>> for SampleId {
+impl<const S: usize> TryFrom<&CidGeneric<S>> for SampleId {
     type Error = CidError;
 
-    fn try_from(cid: CidGeneric<S>) -> Result<Self, Self::Error> {
+    fn try_from(cid: &CidGeneric<S>) -> Result<Self, Self::Error> {
         let codec = cid.codec();
         if codec != SAMPLE_ID_CODEC {
             return Err(CidError::InvalidCidCodec(codec));
@@ -310,8 +310,16 @@ impl<const S: usize> TryFrom<CidGeneric<S>> for SampleId {
     }
 }
 
-impl From<SampleId> for CidGeneric<SAMPLE_ID_SIZE> {
-    fn from(sample_id: SampleId) -> Self {
+impl<const S: usize> TryFrom<CidGeneric<S>> for SampleId {
+    type Error = CidError;
+
+    fn try_from(cid: CidGeneric<S>) -> Result<Self, Self::Error> {
+        SampleId::try_from(&cid)
+    }
+}
+
+impl From<&SampleId> for CidGeneric<SAMPLE_ID_SIZE> {
+    fn from(sample_id: &SampleId) -> Self {
         let mut bytes = BytesMut::with_capacity(SAMPLE_ID_SIZE);
         // length is correct, so unwrap is safe
         sample_id.encode(&mut bytes);
@@ -319,6 +327,12 @@ impl From<SampleId> for CidGeneric<SAMPLE_ID_SIZE> {
         let mh = Multihash::wrap(SAMPLE_ID_MULTIHASH_CODE, &bytes[..]).unwrap();
 
         CidGeneric::new_v1(SAMPLE_ID_CODEC, mh)
+    }
+}
+
+impl From<SampleId> for CidGeneric<SAMPLE_ID_SIZE> {
+    fn from(sample_id: SampleId) -> Self {
+        CidGeneric::<SAMPLE_ID_SIZE>::from(&sample_id)
     }
 }
 

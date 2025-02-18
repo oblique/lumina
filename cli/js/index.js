@@ -127,7 +127,7 @@ function stopped(document) {
 
 async function main(document, window) {
   window.node = await spawnNode();
-  window.txClient = await createTxClient();
+//  window.txClient = await createTxClient();
 
   window.events = await window.node.eventsChannel();
   window.events.onmessage = (event) => {
@@ -163,8 +163,8 @@ async function main(document, window) {
   });
 
   // test submitting transfer
-  const txInfo = await submitBankMsgSend(window.bridge0Address, 10000);
-  console.log("Submitting bank MsgSend successful", txInfo);
+//  const txInfo = await submitBankMsgSend(window.bridge0Address, 10000);
+//  console.log("Submitting bank MsgSend successful", txInfo);
 }
 
 await main(document, window);

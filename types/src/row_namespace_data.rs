@@ -246,10 +246,10 @@ impl RowNamespaceDataId {
     }
 }
 
-impl<const S: usize> TryFrom<CidGeneric<S>> for RowNamespaceDataId {
+impl<const S: usize> TryFrom<&CidGeneric<S>> for RowNamespaceDataId {
     type Error = CidError;
 
-    fn try_from(cid: CidGeneric<S>) -> Result<Self, Self::Error> {
+    fn try_from(cid: &CidGeneric<S>) -> Result<Self, Self::Error> {
         let codec = cid.codec();
         if codec != ROW_NAMESPACE_DATA_CODEC {
             return Err(CidError::InvalidCidCodec(codec));
@@ -274,14 +274,28 @@ impl<const S: usize> TryFrom<CidGeneric<S>> for RowNamespaceDataId {
     }
 }
 
-impl From<RowNamespaceDataId> for CidGeneric<ROW_NAMESPACE_DATA_ID_SIZE> {
-    fn from(namespaced_data_id: RowNamespaceDataId) -> Self {
+impl<const S: usize> TryFrom<CidGeneric<S>> for RowNamespaceDataId {
+    type Error = CidError;
+
+    fn try_from(cid: CidGeneric<S>) -> Result<Self, Self::Error> {
+        RowNamespaceDataId::try_from(&cid)
+    }
+}
+
+impl From<&RowNamespaceDataId> for CidGeneric<ROW_NAMESPACE_DATA_ID_SIZE> {
+    fn from(namespaced_data_id: &RowNamespaceDataId) -> Self {
         let mut bytes = BytesMut::with_capacity(ROW_NAMESPACE_DATA_ID_SIZE);
         namespaced_data_id.encode(&mut bytes);
         // length is correct, so the unwrap is safe
         let mh = Multihash::wrap(ROW_NAMESPACE_DATA_ID_MULTIHASH_CODE, &bytes[..]).unwrap();
 
         CidGeneric::new_v1(ROW_NAMESPACE_DATA_CODEC, mh)
+    }
+}
+
+impl From<RowNamespaceDataId> for CidGeneric<ROW_NAMESPACE_DATA_ID_SIZE> {
+    fn from(namespaced_data_id: RowNamespaceDataId) -> Self {
+        CidGeneric::<ROW_NAMESPACE_DATA_ID_SIZE>::from(&namespaced_data_id)
     }
 }
 

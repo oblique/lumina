@@ -40,7 +40,7 @@ tendermint.workspace = true
 async-trait = "0.1.80"
 beetswap = "0.4.0"
 cid = { version = "0.11.1", features = ["serde-codec"] }
-dashmap = "5.5.3"
+dashmap = "6.1.0"
 futures = "0.3.30"
 rand = "0.8.5"
 serde = { version = "1.0.203", features = ["derive"] }

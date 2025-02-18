@@ -603,8 +603,6 @@ checksum = "3a8241f3ebb85c056b509d4327ad0358fbbba6ffb340bf388f26350aeda225b1"
 [[package]]
 name = "beetswap"
 version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "55f2cf2244bd65e9f00adb06c6b5e951bab980fdacdd572ff035bf610628be99"
 dependencies = [
  "asynchronous-codec",
  "blockstore",
@@ -730,7 +728,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0a8962daed8fb337472d9c4215006443acba1e40c6c91c9d4a3f440d1fb30436"
 dependencies = [
  "cid",
- "dashmap 6.1.0",
+ "dashmap",
  "js-sys",
  "multihash",
  "redb",
@@ -1258,19 +1256,6 @@ dependencies = [
  "rand_core",
  "subtle-ng",
  "zeroize",
-]
-
-[[package]]
-name = "dashmap"
-version = "5.5.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "978747c1d849a7d2ee5e8adc0159961c48fb7e5db2f06af6723b80123bb53856"
-dependencies = [
- "cfg-if",
- "hashbrown 0.14.5",
- "lock_api",
- "once_cell",
- "parking_lot_core",
 ]
 
 [[package]]
@@ -3531,7 +3516,7 @@ dependencies = [
  "celestia-rpc",
  "celestia-types",
  "cid",
- "dashmap 5.5.3",
+ "dashmap",
  "dotenvy",
  "function_name",
  "futures",
