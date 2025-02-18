@@ -227,7 +227,7 @@ impl Multihasher<MAX_MH_SIZE> for ShwapMultihasher {
                 // There are three cases were a CID will not exists in the DAH table:
                 //
                 // 1. A peer replied with an unknown CID, without us requesting it.
-                // 2. Multiple peer replied.
+                // 2. Multiple peers replied.
                 // 3. A peer replied just before it received our cancellation request.
                 //
                 // Because no. 2 can happen often and we want to avoid log spamming,
