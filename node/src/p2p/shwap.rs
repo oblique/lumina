@@ -56,8 +56,6 @@ where
             .client_set_send_dont_have(false)
             .build();
 
-        let dah_table = Arc::new(DashMap::new());
-
         Ok(ShwapBehaviour { bitswap, dah_table })
     }
 
@@ -197,6 +195,7 @@ impl Multihasher<MAX_MH_SIZE> for ShwapMultihasher {
                     .dah_table
                     .get(&cid)
                     .ok_or(MultihasherError::Ignore)?
+                    .value()
                     .clone();
 
                 container
