@@ -1,12 +1,13 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll};
+use std::task::{ready, Context, Poll};
 
 use beetswap::multihasher::{Multihasher, MultihasherError};
 use beetswap::QueryId;
 use blockstore::block::CidError;
 use blockstore::Blockstore;
 use celestia_proto::bitswap::Block;
+use celestia_types::nmt::Namespace;
 use celestia_types::row::{Row, RowId, ROW_ID_MULTIHASH_CODE};
 use celestia_types::row_namespace_data::{
     RowNamespaceData, RowNamespaceDataId, ROW_NAMESPACE_DATA_ID_MULTIHASH_CODE,
@@ -25,10 +26,11 @@ use libp2p::swarm::{
 use libp2p::{Multiaddr, PeerId};
 use prost::Message;
 use tokio::sync::RwLock;
+use tracing::instrument;
 
 use crate::p2p::{P2pError, Result, MAX_MH_SIZE};
 use crate::store::Store;
-use crate::utils::celestia_protocol_id;
+use crate::utils::{celestia_protocol_id, OneshotResultSender, OneshotResultSenderExt};
 
 pub(super) type Cid = CidGeneric<MAX_MH_SIZE>;
 
@@ -38,6 +40,7 @@ where
 {
     bitswap: beetswap::Behaviour<MAX_MH_SIZE, B>,
     dah_table: Arc<DashMap<Cid, Arc<DataAvailabilityHeader>>>,
+    queries: HashMap<beetswap::QueryId, OneshotResultSender<Vec<u8>, P2pError>>,
 }
 
 impl<B> ShwapBehaviour<B>
@@ -56,25 +59,46 @@ where
             .client_set_send_dont_have(false)
             .build();
 
-        Ok(ShwapBehaviour { bitswap, dah_table })
+        Ok(ShwapBehaviour {
+            bitswap,
+            dah_table,
+            queries: HashMap::new(),
+        })
     }
 
-    pub fn get(&mut self, cid: &Cid, dah: &DataAvailabilityHeader) -> QueryId {
-        match self.dah_table.entry(cid.to_owned()) {
-            dashmap::Entry::Vacant(entry) => {
-                entry.insert(Arc::new(dah.to_owned()));
-            }
-            dashmap::Entry::Occupied(entry) => {
-                // TODO: check if DAHs match, if not return an error.
-            }
+    pub fn needs_dah(&self, cid: &Cid) -> bool {
+        !self.dah_table.contains_key(cid)
+    }
+
+    pub fn get(
+        &mut self,
+        cid: &Cid,
+        dah: Option<DataAvailabilityHeader>,
+        respond_to: OneshotResultSender<Vec<u8>, P2pError>,
+    ) {
+        if let Some(dah) = dah {
+            self.dah_table.insert(cid.to_owned(), Arc::new(dah));
         }
 
-        self.bitswap.get(cid)
+        let query_id = self.bitswap.get(cid);
+        self.queries.insert(query_id, respond_to);
     }
 
-    pub fn cancel(&mut self, query_id: QueryId) {
-        self.bitswap.cancel(query_id);
-        // TODO: remove DAH
+    #[instrument(level = "trace", skip(self))]
+    fn on_beetswap_event(&mut self, ev: beetswap::Event) {
+        match ev {
+            beetswap::Event::GetQueryResponse { query_id, data } => {
+                if let Some(respond_to) = self.queries.remove(&query_id) {
+                    respond_to.maybe_send_ok(data);
+                }
+            }
+            beetswap::Event::GetQueryError { query_id, error } => {
+                if let Some(respond_to) = self.queries.remove(&query_id) {
+                    let error: P2pError = error.into();
+                    respond_to.maybe_send_err(error);
+                }
+            }
+        }
     }
 }
 
@@ -84,7 +108,7 @@ where
 {
     type ConnectionHandler =
         <beetswap::Behaviour<MAX_MH_SIZE, B> as NetworkBehaviour>::ConnectionHandler;
-    type ToSwarm = beetswap::Event;
+    type ToSwarm = ();
 
     fn handle_pending_inbound_connection(
         &mut self,
@@ -157,8 +181,25 @@ where
             .on_connection_handler_event(peer_id, connection_id, event);
     }
 
-    fn poll(&mut self, cx: &mut Context) -> Poll<ToSwarm<Self::ToSwarm, THandlerInEvent<Self>>> {
-        self.bitswap.poll(cx)
+    fn poll(&mut self, cx: &mut Context) -> Poll<ToSwarm<(), THandlerInEvent<Self>>> {
+        // Remove closed channels and cancel their queries.
+        self.queries
+            .retain(|&query_id, chan| match chan.poll_closed(cx) {
+                Poll::Ready(_) => {
+                    self.bitswap.cancel(query_id);
+                    false
+                }
+                Poll::Pending => true,
+            });
+
+        // Poll for events
+        match ready!(self.bitswap.poll(cx)) {
+            ToSwarm::GenerateEvent(ev) => {
+                self.on_beetswap_event(ev);
+                Poll::Ready(ToSwarm::GenerateEvent(()))
+            }
+            ev => Poll::Ready(ev.map_out(|_| ())),
+        }
     }
 }
 
@@ -227,7 +268,7 @@ pub(crate) fn sample_cid(row_index: u16, column_index: u16, block_height: u64) -
 
 pub(crate) fn convert_cid<const S: usize>(cid: &CidGeneric<S>) -> Result<Cid> {
     beetswap::utils::convert_cid(cid).ok_or(P2pError::Cid(celestia_types::Error::CidError(
-        CidError::InvalidMultihashLength(64),
+        CidError::InvalidMultihashLength(S),
     )))
 }
 

@@ -686,7 +686,6 @@ where
     cmd_rx: mpsc::Receiver<P2pCmd>,
     peer_tracker: Arc<PeerTracker>,
     header_sub_state: Option<HeaderSubState>,
-    bitswap_queries: HashMap<beetswap::QueryId, OneshotResultSender<Vec<u8>, P2pError>>,
     network_compromised_token: Token,
     store: Arc<S>,
     event_pub: EventPublisher,
@@ -782,7 +781,6 @@ where
             header_sub_topic_hash: header_sub_topic.hash(),
             peer_tracker,
             header_sub_state: None,
-            bitswap_queries: HashMap::new(),
             network_compromised_token: Token::new(),
             store: args.store,
             event_pub: args.event_pub,
@@ -815,9 +813,6 @@ where
                     {
                         self.bootstrap();
                     }
-                }
-                _ = poll_closed(&mut self.bitswap_queries) => {
-                    self.prune_canceled_bitswap_queries();
                 }
                 ev = self.swarm.select_next_some() => {
                     if let Err(e) = self.on_swarm_event(ev).await {
@@ -856,21 +851,6 @@ where
         // trigger kademlia bootstrap
         if self.swarm.behaviour_mut().kademlia.bootstrap().is_err() {
             warn!("Can't run kademlia bootstrap, no known peers");
-        }
-    }
-
-    fn prune_canceled_bitswap_queries(&mut self) {
-        let mut cancelled = SmallVec::<[_; 16]>::new();
-
-        for (query_id, chan) in &self.bitswap_queries {
-            if chan.is_closed() {
-                cancelled.push(*query_id);
-            }
-        }
-
-        for query_id in cancelled {
-            self.bitswap_queries.remove(&query_id);
-            self.swarm.behaviour_mut().shwap.cancel(query_id);
         }
     }
 
@@ -924,11 +904,11 @@ where
                 BehaviourEvent::Identify(ev) => self.on_identify_event(ev).await?,
                 BehaviourEvent::Gossipsub(ev) => self.on_gossip_sub_event(ev).await,
                 BehaviourEvent::Kademlia(ev) => self.on_kademlia_event(ev).await?,
-                BehaviourEvent::Shwap(ev) => self.on_shwap_event(ev).await,
                 BehaviourEvent::Ping(ev) => self.on_ping_event(ev).await,
                 BehaviourEvent::Autonat(_)
                 | BehaviourEvent::ConnectionControl(_)
-                | BehaviourEvent::HeaderEx(_) => {}
+                | BehaviourEvent::HeaderEx(_)
+                | BehaviourEvent::Shwap(_) => {}
             },
             SwarmEvent::ConnectionEstablished {
                 peer_id,
@@ -1102,28 +1082,14 @@ where
     ) {
         trace!("Requesting CID {cid} from bitswap");
 
-        let block_number = get_block_number(&cid).expect("todo");
-        let dah = self.store.get_by_height(block_number).await.unwrap().dah;
+        let dah = if self.swarm.behaviour().shwap.needs_dah(&cid) {
+            let block_number = get_block_number(&cid).expect("todo");
+            Some(self.store.get_by_height(block_number).await.unwrap().dah)
+        } else {
+            None
+        };
 
-        let query_id = self.swarm.behaviour_mut().shwap.get(&cid, &dah);
-        self.bitswap_queries.insert(query_id, respond_to);
-    }
-
-    #[instrument(level = "trace", skip(self))]
-    async fn on_shwap_event(&mut self, ev: beetswap::Event) {
-        match ev {
-            beetswap::Event::GetQueryResponse { query_id, data } => {
-                if let Some(respond_to) = self.bitswap_queries.remove(&query_id) {
-                    respond_to.maybe_send_ok(data);
-                }
-            }
-            beetswap::Event::GetQueryError { query_id, error } => {
-                if let Some(respond_to) = self.bitswap_queries.remove(&query_id) {
-                    let error: P2pError = error.into();
-                    respond_to.maybe_send_err(error);
-                }
-            }
-        }
+        self.swarm.behaviour_mut().shwap.get(&cid, dah, respond_to);
     }
 
     #[instrument(level = "debug", skip_all)]
@@ -1275,23 +1241,6 @@ where
 
         gossipsub::MessageAcceptance::Accept
     }
-}
-
-/// Awaits at least one channel from the `bitswap_queries` to close.
-async fn poll_closed(
-    bitswap_queries: &mut HashMap<beetswap::QueryId, OneshotResultSender<Vec<u8>, P2pError>>,
-) {
-    poll_fn(|cx| {
-        for chan in bitswap_queries.values_mut() {
-            match chan.poll_closed(cx) {
-                Poll::Pending => continue,
-                Poll::Ready(_) => return Poll::Ready(()),
-            }
-        }
-
-        Poll::Pending
-    })
-    .await
 }
 
 fn validate_bootnode_addrs(addrs: &[Multiaddr]) -> Result<(), P2pError> {
