@@ -66,7 +66,7 @@ use crate::events::{EventPublisher, NodeEvent};
 use crate::executor::{self, spawn, Interval, JoinHandle};
 use crate::p2p::header_ex::{HeaderExBehaviour, HeaderExConfig};
 use crate::p2p::header_session::HeaderSession;
-use crate::p2p::shwap::{convert_cid, get_block_container, ShwapMultihasher};
+use crate::p2p::shwap::convert_cid;
 use crate::p2p::swarm::new_swarm;
 use crate::peer_tracker::PeerTracker;
 use crate::peer_tracker::PeerTrackerInfo;
@@ -252,9 +252,8 @@ pub(crate) enum P2pCmd {
         peer_id: PeerId,
         is_trusted: bool,
     },
-    GetShwapCid {
-        cid: Cid,
-        respond_to: OneshotResultSender<Vec<u8>, P2pError>,
+    GetShwapCids {
+        requests: Vec<(Cid, OneshotResultSender<Vec<u8>, P2pError>)>,
     },
     GetNetworkCompromisedToken {
         respond_to: oneshot::Sender<Token>,
@@ -262,6 +261,11 @@ pub(crate) enum P2pCmd {
     GetNetworkHead {
         respond_to: oneshot::Sender<Option<ExtendedHeader>>,
     },
+}
+
+pub(crate) struct ShwapCidRequest {
+    cid: Cid,
+    respond_to: OneshotResultSender<Vec<u8>, P2pError>,
 }
 
 impl P2p {
@@ -496,27 +500,29 @@ impl P2p {
     }
 
     /// Request a [`Cid`] on bitswap protocol.
-    pub(crate) async fn get_shwap_cid(
+    pub(crate) async fn get_shwap_cids(
         &self,
-        cid: Cid,
+        cids: &[Cid],
         timeout: Option<Duration>,
-    ) -> Result<Vec<u8>> {
-        let (tx, rx) = oneshot::channel();
+    ) -> Result<Vec<Vec<u8>>> {
+        let mut rxs = FuturesOrdered::new();
+        let mut requests = Vec::with_capacity(cids.len());
 
-        self.send_command(P2pCmd::GetShwapCid {
-            cid,
-            respond_to: tx,
-        })
-        .await?;
+        for cid in cids {
+            let (tx, rx) = oneshot::channel();
+            requests.push((cid.to_owned(), tx));
+            rxs.push(async move { rx.await? });
+        }
 
-        let data = match timeout {
-            Some(dur) => executor::timeout(dur, rx)
-                .await
-                .map_err(|_| P2pError::BitswapQueryTimeout)???,
-            None => rx.await??,
-        };
+        self.send_command(P2pCmd::GetShwapCids { requests }).await?;
 
-        get_block_container(&cid, &data)
+        let mut all_data = Vec::with_capacity(cids.len());
+
+        while let Some(res) = rxs.next().await {
+            all_data.push(res?);
+        }
+
+        Ok(all_data)
     }
 
     /// Request a [`Row`] on bitswap protocol.
@@ -529,7 +535,7 @@ impl P2p {
         let id = RowId::new(row_index, block_height).map_err(P2pError::Cid)?;
         let cid = convert_cid(&id.into())?;
 
-        let data = self.get_shwap_cid(cid, timeout).await?;
+        let data = &self.get_shwap_cids(&[cid], timeout).await?[0];
         let row = Row::decode(id, &data[..]).map_err(|e| P2pError::Shwap(e.to_string()))?;
         Ok(row)
     }
@@ -545,7 +551,7 @@ impl P2p {
         let id = SampleId::new(row_index, column_index, block_height).map_err(P2pError::Cid)?;
         let cid = convert_cid(&id.into())?;
 
-        let data = self.get_shwap_cid(cid, timeout).await?;
+        let data = &self.get_shwap_cids(&[cid], timeout).await?[0];
         let sample = Sample::decode(id, &data[..]).map_err(|e| P2pError::Shwap(e.to_string()))?;
         Ok(sample)
     }
@@ -562,7 +568,7 @@ impl P2p {
             RowNamespaceDataId::new(namespace, row_index, block_height).map_err(P2pError::Cid)?;
         let cid = convert_cid(&id.into())?;
 
-        let data = self.get_shwap_cid(cid, timeout).await?;
+        let data = &self.get_shwap_cids(&[cid], timeout).await?[0];
         let row_namespace_data =
             RowNamespaceData::decode(id, &data[..]).map_err(|e| P2pError::Shwap(e.to_string()))?;
         Ok(row_namespace_data)
@@ -975,8 +981,8 @@ where
                     self.peer_tracker.set_trusted(peer_id, is_trusted);
                 }
             }
-            P2pCmd::GetShwapCid { cid, respond_to } => {
-                self.on_get_shwap_cid(cid, respond_to).await;
+            P2pCmd::GetShwapCids { requests } => {
+                self.on_get_shwap_cids(requests).await;
             }
             P2pCmd::GetNetworkCompromisedToken { respond_to } => {
                 respond_to.maybe_send(self.network_compromised_token.clone())
@@ -1075,21 +1081,22 @@ where
     }
 
     #[instrument(level = "trace", skip_all)]
-    async fn on_get_shwap_cid(
+    async fn on_get_shwap_cids(
         &mut self,
-        cid: Cid,
-        respond_to: OneshotResultSender<Vec<u8>, P2pError>,
+        requests: Vec<(Cid, OneshotResultSender<Vec<u8>, P2pError>)>,
     ) {
-        trace!("Requesting CID {cid} from bitswap");
+        for (cid, respond_to) in requests {
+            trace!("Requesting CID {cid} from bitswap");
 
-        let dah = if self.swarm.behaviour().shwap.needs_dah(&cid) {
-            let block_number = get_block_number(&cid).expect("todo");
-            Some(self.store.get_by_height(block_number).await.unwrap().dah)
-        } else {
-            None
-        };
+            let dah = if self.swarm.behaviour().shwap.needs_dah(&cid) {
+                let block_number = get_block_number(&cid).expect("todo");
+                Some(self.store.get_by_height(block_number).await.unwrap().dah)
+            } else {
+                None
+            };
 
-        self.swarm.behaviour_mut().shwap.get(&cid, dah, respond_to);
+            self.swarm.behaviour_mut().shwap.get(&cid, dah, respond_to);
+        }
     }
 
     #[instrument(level = "debug", skip_all)]

@@ -603,6 +603,8 @@ checksum = "3a8241f3ebb85c056b509d4327ad0358fbbba6ffb340bf388f26350aeda225b1"
 [[package]]
 name = "beetswap"
 version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "55f2cf2244bd65e9f00adb06c6b5e951bab980fdacdd572ff035bf610628be99"
 dependencies = [
  "asynchronous-codec",
  "blockstore",

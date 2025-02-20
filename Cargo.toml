@@ -23,7 +23,7 @@ wasm-bindgen-test = "0.3.49"
 
 [patch.crates-io]
 # Uncomment to apply local changes
-beetswap = { path = "../beetswap" }
+#beetswap = { path = "../beetswap" }
 #blockstore = { path = "../blockstore" }
 #nmt-rs = { path = "../nmt-rs" }
 #libp2p = { path = "../../rust-libp2p/libp2p" }

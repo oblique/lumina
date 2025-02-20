@@ -30,7 +30,9 @@ use tracing::instrument;
 
 use crate::p2p::{P2pError, Result, MAX_MH_SIZE};
 use crate::store::Store;
-use crate::utils::{celestia_protocol_id, OneshotResultSender, OneshotResultSenderExt};
+use crate::utils::{
+    celestia_protocol_id, OneshotResultSender, OneshotResultSenderExt, OneshotSenderExt,
+};
 
 pub(super) type Cid = CidGeneric<MAX_MH_SIZE>;
 
@@ -40,7 +42,12 @@ where
 {
     bitswap: beetswap::Behaviour<MAX_MH_SIZE, B>,
     dah_table: Arc<DashMap<Cid, Arc<DataAvailabilityHeader>>>,
-    queries: HashMap<beetswap::QueryId, OneshotResultSender<Vec<u8>, P2pError>>,
+    queries: HashMap<beetswap::QueryId, QueryInfo>,
+}
+
+struct QueryInfo {
+    cid: Cid,
+    respond_to: OneshotResultSender<Vec<u8>, P2pError>,
 }
 
 impl<B> ShwapBehaviour<B>
@@ -81,21 +88,29 @@ where
         }
 
         let query_id = self.bitswap.get(cid);
-        self.queries.insert(query_id, respond_to);
+
+        self.queries.insert(
+            query_id,
+            QueryInfo {
+                cid: cid.to_owned(),
+                respond_to,
+            },
+        );
     }
 
     #[instrument(level = "trace", skip(self))]
     fn on_beetswap_event(&mut self, ev: beetswap::Event) {
         match ev {
             beetswap::Event::GetQueryResponse { query_id, data } => {
-                if let Some(respond_to) = self.queries.remove(&query_id) {
-                    respond_to.maybe_send_ok(data);
+                if let Some(info) = self.queries.remove(&query_id) {
+                    let inner_data_res = get_block_container(&info.cid, &data);
+                    info.respond_to.maybe_send(inner_data_res);
                 }
             }
             beetswap::Event::GetQueryError { query_id, error } => {
-                if let Some(respond_to) = self.queries.remove(&query_id) {
+                if let Some(info) = self.queries.remove(&query_id) {
                     let error: P2pError = error.into();
-                    respond_to.maybe_send_err(error);
+                    info.respond_to.maybe_send_err(error);
                 }
             }
         }
@@ -184,7 +199,7 @@ where
     fn poll(&mut self, cx: &mut Context) -> Poll<ToSwarm<(), THandlerInEvent<Self>>> {
         // Remove closed channels and cancel their queries.
         self.queries
-            .retain(|&query_id, chan| match chan.poll_closed(cx) {
+            .retain(|&query_id, info| match info.respond_to.poll_closed(cx) {
                 Poll::Ready(_) => {
                     self.bitswap.cancel(query_id);
                     false
@@ -204,7 +219,7 @@ where
 }
 
 /// Multihasher for Shwap types.
-pub(super) struct ShwapMultihasher {
+struct ShwapMultihasher {
     dah_table: Arc<DashMap<Cid, Arc<DataAvailabilityHeader>>>,
 }
 
@@ -220,24 +235,23 @@ impl Multihasher<MAX_MH_SIZE> for ShwapMultihasher {
                 let cid = Cid::read_bytes(block.cid.as_slice())
                     .map_err(MultihasherError::custom_fatal)?;
 
-                let id = <$id_type>::try_from(&cid).map_err(MultihasherError::custom_fatal)?;
-                let container = <$container_type>::decode(id, block.container.as_slice())
-                    .map_err(MultihasherError::custom_fatal)?;
-
                 // There are three cases were a CID will not exists in the DAH table:
                 //
-                // 1. A peer replied with an unknown CID, without us requesting it.
+                // 1. A peer replied with data of a CID we didn't request
                 // 2. Multiple peers replied.
                 // 3. A peer replied just before it received our cancellation request.
                 //
                 // Because no. 2 can happen often and we want to avoid log spamming,
-                // we decided to just ignore the reply.
-                let dah = self
-                    .dah_table
-                    .get(&cid)
-                    .ok_or(MultihasherError::Ignore)?
-                    .value()
-                    .clone();
+                // we decided to just return an empty multihash, which will not
+                // match any requests, thus it will be discarded.
+                let dah = match self.dah_table.get(&cid) {
+                    Some(val) => val.value().clone(),
+                    None => return Ok(Multihash::default()),
+                };
+
+                let id = <$id_type>::try_from(&cid).map_err(MultihasherError::custom_fatal)?;
+                let container = <$container_type>::decode(id, block.container.as_slice())
+                    .map_err(MultihasherError::custom_fatal)?;
 
                 container
                     .verify(id, &dah)
@@ -273,7 +287,7 @@ pub(crate) fn convert_cid<const S: usize>(cid: &CidGeneric<S>) -> Result<Cid> {
 }
 
 /// extracts the `container` part from shwaps `Block` wrapper if the cid matches expected one
-pub(crate) fn get_block_container(expected_cid: &Cid, block: &[u8]) -> Result<Vec<u8>> {
+fn get_block_container(expected_cid: &Cid, block: &[u8]) -> Result<Vec<u8>> {
     let block = Block::decode(block)?;
     let block_cid = Cid::read_bytes(block.cid.as_slice())?;
     if block_cid != *expected_cid {
