@@ -1,6 +1,7 @@
 use std::task::{Context, Poll};
 
 use libp2p::{
+    connection_limits::ConnectionLimits,
     core::{transport::PortUse, Endpoint},
     swarm::{
         dummy, ConnectionDenied, ConnectionId, FromSwarm, NetworkBehaviour, THandler,
@@ -13,6 +14,7 @@ use void::Void;
 // TODO: Wrap ConnectionLimits in it and exclude limits from trusted peers
 pub(crate) struct Behaviour {
     stopping: bool,
+    limits: ConnectionLimits,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -21,7 +23,10 @@ struct Stopping;
 
 impl Behaviour {
     pub(crate) fn new() -> Behaviour {
-        Behaviour { stopping: false }
+        Behaviour {
+            stopping: false,
+            limits: ConnectionLimits::default(),
+        }
     }
 
     pub(crate) fn set_stopping(&mut self, value: bool) {
