@@ -30,7 +30,6 @@ where
     S: RequestSender,
 {
     reqs: HashMap<S::RequestId, State>,
-    peer_tracker: Arc<PeerTracker>,
     cancellation_token: CancellationToken,
     tasks: FuturesUnordered<BoxFuture<'static, ()>>,
 }
@@ -91,10 +90,9 @@ impl<S> HeaderExClientHandler<S>
 where
     S: RequestSender,
 {
-    pub(super) fn new(peer_tracker: Arc<PeerTracker>) -> Self {
+    pub(super) fn new() -> Self {
         HeaderExClientHandler {
             reqs: HashMap::new(),
-            peer_tracker,
             cancellation_token: CancellationToken::new(),
             tasks: FuturesUnordered::new(),
         }
@@ -106,6 +104,7 @@ where
         sender: &mut S,
         request: HeaderRequest,
         respond_to: OneshotResultSender<Vec<ExtendedHeader>, P2pError>,
+        peer_tracker: &PeerTracker,
     ) {
         if self.cancellation_token.is_cancelled() {
             respond_to.maybe_send_err(HeaderExError::RequestCancelled);
@@ -118,9 +117,9 @@ where
         }
 
         if request.is_head_request() {
-            self.send_head_request(sender, request, respond_to);
+            self.send_head_request(sender, request, respond_to, peer_tracker);
         } else {
-            self.send_request(sender, request, respond_to);
+            self.send_request(sender, request, respond_to, peer_tracker);
         }
 
         trace!("Request initiated");
@@ -131,6 +130,7 @@ where
         sender: &mut S,
         request: HeaderRequest,
         respond_to: OneshotResultSender<Vec<ExtendedHeader>, P2pError>,
+        peer_tracker: &PeerTracker,
     ) {
         // Validate amount
         if usize::try_from(request.amount).is_err() {
@@ -138,7 +138,7 @@ where
             return;
         };
 
-        let Some(peer) = self.peer_tracker.best_peer() else {
+        let Some(peer) = peer_tracker.best_peer() else {
             respond_to.maybe_send_err(P2pError::NoConnectedPeers);
             return;
         };
@@ -157,11 +157,12 @@ where
         sender: &mut S,
         request: HeaderRequest,
         respond_to: OneshotResultSender<Vec<ExtendedHeader>, P2pError>,
+        peer_tracker: &PeerTracker,
     ) {
         const MIN_HEAD_RESPONSES: usize = 2;
 
         // For now HEAD is requested from trusted peers only!
-        let peers = self.peer_tracker.trusted_n_peers(MAX_PEERS);
+        let peers = peer_tracker.trusted_n_peers(MAX_PEERS);
 
         if peers.is_empty() {
             respond_to.maybe_send_err(P2pError::NoConnectedPeers);

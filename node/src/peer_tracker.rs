@@ -36,7 +36,9 @@ struct PeerInfo {
     state: PeerState,
     addrs: SmallVec<[Multiaddr; 4]>,
     connections: SmallVec<[ConnectionId; 1]>,
+    //node_kind: NodeKind,
     trusted: bool,
+    archival: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +46,12 @@ enum PeerState {
     Discovered,
     AddressesFound,
     Connected,
+}
+
+pub enum NodeKind {
+    Bridge,
+    Full,
+    Light,
 }
 
 impl PeerInfo {
@@ -83,6 +91,7 @@ impl PeerTracker {
                     addrs: SmallVec::new(),
                     connections: SmallVec::new(),
                     trusted: false,
+                    archival: false,
                 });
                 true
             }
@@ -99,6 +108,7 @@ impl PeerTracker {
             addrs: SmallVec::new(),
             connections: SmallVec::new(),
             trusted: false,
+            archival: false,
         })
     }
 
