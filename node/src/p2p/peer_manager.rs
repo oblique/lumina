@@ -3,6 +3,7 @@ use std::task::{Context, Poll};
 use libp2p::{
     connection_limits::ConnectionLimits,
     core::{transport::PortUse, Endpoint},
+    identify,
     kad::{self, RecordKey},
     swarm::{
         dummy, ConnectionDenied, ConnectionId, FromSwarm, NetworkBehaviour, THandler,
@@ -13,23 +14,41 @@ use libp2p::{
 use multihash_codetable::{Code, MultihashDigest};
 use void::Void;
 
+pub(crate) use self::imp::BehaviourEvent;
 use crate::peer_tracker::PeerTracker;
 
 // TODO: Wrap ConnectionLimits in it and exclude limits from trusted peers
 pub(crate) struct Behaviour {
-    kademlia: kad::Behaviour<kad::store::MemoryStore>,
+    //kademlia: kad::Behaviour<kad::store::MemoryStore>,
+    inner: imp::Behaviour,
     pub(crate) peer_tracker: PeerTracker,
+}
+
+mod imp {
+    use super::*;
+
+    #[derive(NetworkBehaviour)]
+    pub(crate) struct Behaviour {
+        kademlia: kad::Behaviour<kad::store::MemoryStore>,
+        identify: identify::Behaviour,
+    }
 }
 
 impl Behaviour {
     pub(crate) fn new() -> Behaviour {
         todo!();
     }
+
+    pub(crate) fn bootstrap(&mut self) {}
+
+    pub(crate) fn on_kademlia_event(&mut self, ev: kad::Event) {}
+
+    pub(crate) fn on_identify_event(&mut self, ev: identify::Event) {}
 }
 
 impl NetworkBehaviour for Behaviour {
-    type ConnectionHandler = THandler<kad::Behaviour<kad::store::MemoryStore>>;
-    type ToSwarm = Void;
+    type ConnectionHandler = THandler<imp::Behaviour>;
+    type ToSwarm = BehaviourEvent;
 
     fn handle_pending_inbound_connection(
         &mut self,
@@ -37,9 +56,8 @@ impl NetworkBehaviour for Behaviour {
         local_addr: &Multiaddr,
         remote_addr: &Multiaddr,
     ) -> Result<(), ConnectionDenied> {
-        self.kademlia
-            .handle_pending_inbound_connection(connection_id, local_addr, remote_addr);
-        Ok(())
+        self.inner
+            .handle_pending_inbound_connection(connection_id, local_addr, remote_addr)
     }
 
     fn handle_established_inbound_connection(
@@ -49,7 +67,7 @@ impl NetworkBehaviour for Behaviour {
         local_addr: &Multiaddr,
         remote_addr: &Multiaddr,
     ) -> Result<THandler<Self>, ConnectionDenied> {
-        self.kademlia.handle_established_inbound_connection(
+        self.inner.handle_established_inbound_connection(
             connection_id,
             peer,
             local_addr,
@@ -64,7 +82,7 @@ impl NetworkBehaviour for Behaviour {
         addresses: &[Multiaddr],
         effective_role: Endpoint,
     ) -> Result<Vec<Multiaddr>, ConnectionDenied> {
-        self.kademlia.handle_pending_outbound_connection(
+        self.inner.handle_pending_outbound_connection(
             connection_id,
             maybe_peer,
             addresses,
@@ -80,7 +98,7 @@ impl NetworkBehaviour for Behaviour {
         role_override: Endpoint,
         port_use: PortUse,
     ) -> Result<THandler<Self>, ConnectionDenied> {
-        self.kademlia.handle_established_outbound_connection(
+        self.inner.handle_established_outbound_connection(
             connection_id,
             peer,
             addr,
@@ -95,20 +113,34 @@ impl NetworkBehaviour for Behaviour {
         connection_id: ConnectionId,
         event: THandlerOutEvent<Self>,
     ) {
-        self.kademlia
+        self.inner
             .on_connection_handler_event(peer_id, connection_id, event);
     }
 
     fn on_swarm_event(&mut self, event: FromSwarm) {
-        self.kademlia.on_swarm_event(event);
+        self.inner.on_swarm_event(event);
     }
 
     fn poll(
         &mut self,
         cx: &mut Context<'_>,
-    ) -> Poll<ToSwarm<Self::ToSwarm, THandlerInEvent<Self>>> {
-        // TODO
-        self.kademlia.poll(cx);
+    ) -> Poll<ToSwarm<BehaviourEvent, THandlerInEvent<Self>>> {
+        while let Poll::Ready(ev) = self.inner.poll(cx) {
+            match ev {
+                ToSwarm::GenerateEvent(ev) => match ev {
+                    BehaviourEvent::Kademlia(ev) => {
+                        self.on_kademlia_event(ev);
+                        continue;
+                    }
+                    BehaviourEvent::Identify(ev) => {
+                        self.on_identify_event(ev);
+                        continue;
+                    }
+                    ev => return Poll::Ready(ToSwarm::GenerateEvent(ev)),
+                },
+                ev => return Poll::Ready(ev),
+            }
+        }
 
         Poll::Pending
     }

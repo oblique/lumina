@@ -113,7 +113,7 @@ impl PeerTracker {
     }
 
     /// Add an address for a peer.
-    pub fn add_addresses<I, A>(&self, peer: PeerId, addrs: I)
+    pub fn add_addresses<I, A>(&mut self, peer: PeerId, addrs: I)
     where
         I: IntoIterator<Item = A>,
         A: Borrow<Multiaddr>,
@@ -135,7 +135,7 @@ impl PeerTracker {
     }
 
     /// Sets peer as trusted.
-    pub fn set_trusted(&self, peer: PeerId, is_trusted: bool) {
+    pub fn set_trusted(&mut self, peer: PeerId, is_trusted: bool) {
         let mut peer_info = self.get(peer);
 
         if peer_info.trusted == is_trusted {
@@ -160,7 +160,7 @@ impl PeerTracker {
 
     /// Sets peer as connected.
     pub fn set_connected(
-        &self,
+        &mut self,
         peer: PeerId,
         connection_id: ConnectionId,
         address: impl Into<Option<Multiaddr>>,
@@ -191,7 +191,7 @@ impl PeerTracker {
     /// Sets peer as disconnected if `connection_id` was the last connection.
     ///
     /// Returns `true` if was set to disconnected.
-    pub fn set_maybe_disconnected(&self, peer: PeerId, connection_id: ConnectionId) -> bool {
+    pub fn set_maybe_disconnected(&mut self, peer: PeerId, connection_id: ConnectionId) -> bool {
         let mut peer_info = self.get(peer);
 
         peer_info.connections.retain(|id| *id != connection_id);

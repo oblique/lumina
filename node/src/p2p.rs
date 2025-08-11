@@ -59,9 +59,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, trace, warn};
 
 mod connection_control;
-mod discovery;
 mod header_ex;
 pub(crate) mod header_session;
+mod peer_manager;
 pub(crate) mod shwap;
 mod swarm;
 
@@ -707,11 +707,10 @@ where
     S: Store + 'static,
 {
     connection_control: connection_control::Behaviour,
-    discovery: discovery::Behaviour,
+    peer_manager: peer_manager::Behaviour,
     autonat: autonat::Behaviour,
     bitswap: beetswap::Behaviour<MAX_MH_SIZE, B>,
     ping: ping::Behaviour,
-    identify: identify::Behaviour,
     header_ex: HeaderExBehaviour<S>,
     gossipsub: gossipsub::Behaviour,
     kademlia: kad::Behaviour<kad::store::MemoryStore>,
@@ -752,7 +751,7 @@ where
         args: P2pArgs<B, S>,
         cancellation_token: CancellationToken,
         cmd_rx: mpsc::Receiver<P2pCmd>,
-        peer_tracker: PeerTracker,
+        mut peer_tracker: PeerTracker,
     ) -> Result<Self, P2pError> {
         let local_peer_id = PeerId::from(args.local_keypair.public());
 
@@ -785,11 +784,10 @@ where
 
         let behaviour = Behaviour {
             connection_control,
-            discovery: discovery::Behaviour::new(),
+            peer_manager: peer_manager::Behaviour::new(),
             autonat,
             bitswap,
             ping,
-            identify,
             gossipsub,
             header_ex,
             kademlia,
@@ -842,14 +840,18 @@ where
     async fn run(&mut self) {
         let mut report_interval = Interval::new(Duration::from_secs(60)).await;
         let mut kademlia_interval = Interval::new(Duration::from_secs(30)).await;
-        let mut peer_tracker_info_watcher =
-            self.swarm.behaviour().discovery.peer_tracker.info_watcher();
+        let mut peer_tracker_info_watcher = self
+            .swarm
+            .behaviour()
+            .peer_manager
+            .peer_tracker
+            .info_watcher();
 
         // Initiate discovery
         self.bootstrap();
 
-        let key = discovery::topic_to_dht_key("/full/v0.1.0");
-        let key = discovery::topic_to_dht_key("/archival/v0.1.0");
+        let key = peer_manager::topic_to_dht_key("/full/v0.1.0");
+        let key = peer_manager::topic_to_dht_key("/archival/v0.1.0");
 
         let id = self
             .swarm
@@ -867,6 +869,8 @@ where
             .unwrap();
 
         loop {
+            self.peer_manager.tick(&mut self.swarm).await;
+
             select! {
                 _ = self.cancellation_token.cancelled() => break,
                 _ = peer_tracker_info_watcher.changed() => {
@@ -894,7 +898,7 @@ where
                 }
                 _ = kademlia_interval.tick() => {
                     // TODO move to discovery
-                    if self.swarm.behaviour().discovery.peer_tracker.info().num_connected_peers < MIN_CONNECTED_PEERS
+                    if self.swarm.behaviour().peer_manager.peer_tracker.info().num_connected_peers < MIN_CONNECTED_PEERS
                     {
                         self.bootstrap();
                     }
@@ -969,7 +973,13 @@ where
         }
 
         // TODO move to discovery
-        for (_, ids) in self.swarm.behaviour().discovery.peer_tracker.connections() {
+        for (_, ids) in self
+            .swarm
+            .behaviour()
+            .peer_manager
+            .peer_tracker
+            .connections()
+        {
             for id in ids {
                 self.swarm.close_connection(id);
             }
@@ -1005,14 +1015,15 @@ where
     async fn on_swarm_event(&mut self, ev: SwarmEvent<BehaviourEvent<B, S>>) -> Result<()> {
         match ev {
             SwarmEvent::Behaviour(ev) => match ev {
-                BehaviourEvent::Identify(ev) => self.on_identify_event(ev).await?,
+                BehaviourEvent::Identify(ev) => self.peer_manager.on_identify_event(ev).await?,
                 BehaviourEvent::Gossipsub(ev) => self.on_gossip_sub_event(ev).await,
                 BehaviourEvent::Kademlia(ev) => self.on_kademlia_event(ev).await?,
                 BehaviourEvent::Bitswap(ev) => self.on_bitswap_event(ev).await,
                 BehaviourEvent::Ping(ev) => self.on_ping_event(ev).await,
                 BehaviourEvent::Autonat(_)
                 | BehaviourEvent::ConnectionControl(_)
-                | BehaviourEvent::HeaderEx(_) => {}
+                | BehaviourEvent::HeaderEx(_)
+                | BehaviourEvent::PeerManager(_) => {}
             },
             SwarmEvent::ConnectionEstablished {
                 peer_id,
@@ -1045,7 +1056,7 @@ where
                 respond_to,
             } => {
                 let behaviour = self.swarm.behaviour_mut();
-                let peer_tracker = &behaviour.discovery.peer_tracker;
+                let peer_tracker = &behaviour.peer_manager.peer_tracker;
                 behaviour
                     .header_ex
                     .send_request(request, respond_to, peer_tracker);
@@ -1070,7 +1081,7 @@ where
                 let peers = self
                     .swarm
                     .behaviour()
-                    .discovery
+                    .peer_manager
                     .peer_tracker
                     .connected_peers();
                 respond_to.maybe_send(peers);
@@ -1085,7 +1096,7 @@ where
                 if *self.swarm.local_peer_id() != peer_id {
                     self.swarm
                         .behaviour_mut()
-                        .discovery
+                        .peer_manager
                         .peer_tracker
                         .set_trusted(peer_id, is_trusted);
                 }
@@ -1110,7 +1121,7 @@ where
 
     #[instrument(skip_all)]
     fn report(&mut self) {
-        let tracker_info = self.swarm.behaviour().discovery.peer_tracker.info();
+        let tracker_info = self.swarm.behaviour().peer_manager.peer_tracker.info();
 
         info!(
             "peers: {}, trusted peers: {}",
@@ -1193,7 +1204,7 @@ where
                 // TODO move to discovery
                 self.swarm
                     .behaviour_mut()
-                    .discovery
+                    .peer_manager
                     .peer_tracker
                     .add_addresses(peer, addresses.iter());
             }
@@ -1266,7 +1277,7 @@ where
         if !self
             .swarm
             .behaviour_mut()
-            .discovery
+            .peer_manager
             .peer_tracker
             .set_maybe_discovered(peer_id)
         {
@@ -1302,7 +1313,7 @@ where
         // TODO maybe move to discovery
         self.swarm
             .behaviour_mut()
-            .discovery
+            .peer_manager
             .peer_tracker
             .set_connected(peer_id, connection_id, dialed_addr);
     }
@@ -1313,7 +1324,7 @@ where
         if self
             .swarm
             .behaviour_mut()
-            .discovery
+            .peer_manager
             .peer_tracker
             .set_maybe_disconnected(peer_id, connection_id)
         {
