@@ -1,5 +1,6 @@
 use std::task::{Context, Poll};
 
+use blockstore::Blockstore;
 use libp2p::{
     connection_limits::ConnectionLimits,
     core::{transport::PortUse, Endpoint},
@@ -9,140 +10,36 @@ use libp2p::{
         dummy, ConnectionDenied, ConnectionId, FromSwarm, NetworkBehaviour, THandler,
         THandlerInEvent, THandlerOutEvent, ToSwarm,
     },
-    Multiaddr, PeerId,
+    Multiaddr, PeerId, Swarm,
 };
 use multihash_codetable::{Code, MultihashDigest};
 use void::Void;
 
-pub(crate) use self::imp::BehaviourEvent;
+use crate::p2p::Behaviour;
 use crate::peer_tracker::PeerTracker;
+use crate::store::Store;
 
-// TODO: Wrap ConnectionLimits in it and exclude limits from trusted peers
-pub(crate) struct Behaviour {
+/// NOTE: This does not implement `NetworkBehaviour` on purpose.
+pub(crate) struct PeerManager {
     //kademlia: kad::Behaviour<kad::store::MemoryStore>,
-    inner: imp::Behaviour,
+    //    inner: imp::Behaviour,
     pub(crate) peer_tracker: PeerTracker,
 }
 
-mod imp {
-    use super::*;
-
-    #[derive(NetworkBehaviour)]
-    pub(crate) struct Behaviour {
-        kademlia: kad::Behaviour<kad::store::MemoryStore>,
-        identify: identify::Behaviour,
+impl PeerManager {
+    pub(crate) fn new(peer_tracker: PeerTracker) -> PeerManager {
+        PeerManager { peer_tracker }
     }
-}
-
-impl Behaviour {
-    pub(crate) fn new() -> Behaviour {
-        todo!();
-    }
-
-    pub(crate) fn bootstrap(&mut self) {}
 
     pub(crate) fn on_kademlia_event(&mut self, ev: kad::Event) {}
 
     pub(crate) fn on_identify_event(&mut self, ev: identify::Event) {}
-}
 
-impl NetworkBehaviour for Behaviour {
-    type ConnectionHandler = THandler<imp::Behaviour>;
-    type ToSwarm = BehaviourEvent;
-
-    fn handle_pending_inbound_connection(
-        &mut self,
-        connection_id: ConnectionId,
-        local_addr: &Multiaddr,
-        remote_addr: &Multiaddr,
-    ) -> Result<(), ConnectionDenied> {
-        self.inner
-            .handle_pending_inbound_connection(connection_id, local_addr, remote_addr)
-    }
-
-    fn handle_established_inbound_connection(
-        &mut self,
-        connection_id: ConnectionId,
-        peer: PeerId,
-        local_addr: &Multiaddr,
-        remote_addr: &Multiaddr,
-    ) -> Result<THandler<Self>, ConnectionDenied> {
-        self.inner.handle_established_inbound_connection(
-            connection_id,
-            peer,
-            local_addr,
-            remote_addr,
-        )
-    }
-
-    fn handle_pending_outbound_connection(
-        &mut self,
-        connection_id: ConnectionId,
-        maybe_peer: Option<PeerId>,
-        addresses: &[Multiaddr],
-        effective_role: Endpoint,
-    ) -> Result<Vec<Multiaddr>, ConnectionDenied> {
-        self.inner.handle_pending_outbound_connection(
-            connection_id,
-            maybe_peer,
-            addresses,
-            effective_role,
-        )
-    }
-
-    fn handle_established_outbound_connection(
-        &mut self,
-        connection_id: ConnectionId,
-        peer: PeerId,
-        addr: &Multiaddr,
-        role_override: Endpoint,
-        port_use: PortUse,
-    ) -> Result<THandler<Self>, ConnectionDenied> {
-        self.inner.handle_established_outbound_connection(
-            connection_id,
-            peer,
-            addr,
-            role_override,
-            port_use,
-        )
-    }
-
-    fn on_connection_handler_event(
-        &mut self,
-        peer_id: PeerId,
-        connection_id: ConnectionId,
-        event: THandlerOutEvent<Self>,
-    ) {
-        self.inner
-            .on_connection_handler_event(peer_id, connection_id, event);
-    }
-
-    fn on_swarm_event(&mut self, event: FromSwarm) {
-        self.inner.on_swarm_event(event);
-    }
-
-    fn poll(
-        &mut self,
-        cx: &mut Context<'_>,
-    ) -> Poll<ToSwarm<BehaviourEvent, THandlerInEvent<Self>>> {
-        while let Poll::Ready(ev) = self.inner.poll(cx) {
-            match ev {
-                ToSwarm::GenerateEvent(ev) => match ev {
-                    BehaviourEvent::Kademlia(ev) => {
-                        self.on_kademlia_event(ev);
-                        continue;
-                    }
-                    BehaviourEvent::Identify(ev) => {
-                        self.on_identify_event(ev);
-                        continue;
-                    }
-                    ev => return Poll::Ready(ToSwarm::GenerateEvent(ev)),
-                },
-                ev => return Poll::Ready(ev),
-            }
-        }
-
-        Poll::Pending
+    pub(crate) async fn poll<B, S>(&mut self, swarm: &mut Swarm<Behaviour<B, S>>)
+    where
+        B: Blockstore,
+        S: Store,
+    {
     }
 }
 
