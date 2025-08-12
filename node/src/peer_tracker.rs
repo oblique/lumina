@@ -139,6 +139,7 @@ impl PeerTracker {
         address: impl Into<Option<Multiaddr>>,
     ) {
         let peer = self.peers.entry(peer_id.to_owned()).or_default();
+        let prev_connected = peer.is_connected();
 
         if let Some(address) = address.into() {
             peer.add_address(address);
@@ -148,7 +149,7 @@ impl PeerTracker {
         self.connection_to_peer.insert(connection_id, peer_id);
 
         // If peer was not already connected from before
-        if !peer.is_connected() {
+        if !prev_connected {
             increment_connected_peers(&self.info_tx, peer.trusted);
 
             self.event_pub.send(NodeEvent::PeerConnected {
