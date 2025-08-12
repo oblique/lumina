@@ -1,6 +1,6 @@
 //! Primitives related to tracking the state of peers in the network.
 
-use std::borrow::Borrow;
+use std::{borrow::Borrow, collections::HashMap};
 
 use dashmap::mapref::entry::Entry;
 use dashmap::mapref::one::RefMut;

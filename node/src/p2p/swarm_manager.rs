@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::LazyLock;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -45,8 +46,11 @@ use crate::utils::{celestia_protocol_id, MultiaddrExt};
 // more aggresively.
 const MIN_CONNECTED_PEERS: u64 = 4;
 
+static FULL_NODE_TOPIC: LazyLock<RecordKey> = LazyLock::new(|| dht_topic("/full/v0.1.0"));
+static ARCHIVAL_NODE_TOPIC: LazyLock<RecordKey> = LazyLock::new(|| dht_topic("/archival/v0.1.0"));
+
 #[derive(NetworkBehaviour)]
-pub(crate) struct SwarmBehaviour<B>
+struct SwarmBehaviour<B>
 where
     B: NetworkBehaviour + 'static,
 {
@@ -475,7 +479,7 @@ fn init_kademlia(
 ///
 /// [1]: https://github.com/libp2p/go-libp2p/blob/f6c14a215b2012f3839f1b7157dfec70a772143a/p2p/discovery/routing/routing.go#L75
 /// [2]: https://github.com/libp2p/go-libp2p-kad-dht/blob/944883ea5a55102c8950478645d89183901859b4/routing.go#L504
-pub(crate) fn topic_to_dht_key(topic: &str) -> RecordKey {
+pub(crate) fn dht_topic(topic: &str) -> RecordKey {
     Code::Sha2_256.digest(topic.as_bytes()).into()
 }
 
@@ -485,7 +489,7 @@ mod tests {
 
     #[test]
     fn dht_key() {
-        let key = topic_to_dht_key("/full/v0.1.0");
+        let key = dht_topic("/full/v0.1.0");
         let key_vec = topic_to_dht_key_vec("/full/v0.1.0");
         let expected = "bafkreidjoruznlfsmvecpvipnfpoe4jehgjjd753qob53bo77se6whba34"
             .parse::<Cid>()
