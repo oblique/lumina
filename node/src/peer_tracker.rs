@@ -14,7 +14,7 @@ use crate::events::{EventPublisher, NodeEvent};
 
 /// Keeps track various information about peers.
 #[derive(Debug)]
-pub struct PeerTracker {
+pub(crate) struct PeerTracker {
     peers: HashMap<PeerId, Peer>,
     connection_to_peer: HashMap<ConnectionId, PeerId>,
     info_tx: watch::Sender<PeerTrackerInfo>,
@@ -37,15 +37,33 @@ struct Peer {
     connections: SmallVec<[ConnectionId; 1]>,
     trusted: bool,
     archival: bool,
-    kind: Option<NodeKind>,
+    kind: NodeKind,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum NodeKind {
+pub(crate) enum NodeKind {
+    #[default]
+    Unknown,
     Bridge,
     Full,
-    #[default]
     Light,
+}
+
+impl NodeKind {
+    fn from_agent_version(s: &str) -> NodeKind {
+        let mut s = s.split('/');
+
+        match s.next() {
+            Some("lumina") => NodeKind::Light,
+            Some("celestia-node") => match s.nth(1) {
+                Some("bridge") => NodeKind::Bridge,
+                Some("full") => NodeKind::Full,
+                Some("light") => NodeKind::Light,
+                _ => NodeKind::Unknown,
+            },
+            _ => NodeKind::Unknown,
+        }
+    }
 }
 
 impl Peer {
@@ -62,7 +80,7 @@ impl Peer {
 
 impl PeerTracker {
     /// Constructs an empty PeerTracker.
-    pub fn new(event_pub: EventPublisher) -> Self {
+    pub(crate) fn new(event_pub: EventPublisher) -> Self {
         PeerTracker {
             peers: HashMap::new(),
             connection_to_peer: HashMap::new(),
@@ -72,19 +90,19 @@ impl PeerTracker {
     }
 
     /// Returns the current [`PeerTrackerInfo`].
-    pub fn info(&self) -> PeerTrackerInfo {
+    pub(crate) fn info(&self) -> PeerTrackerInfo {
         self.info_tx.borrow().to_owned()
     }
 
     /// Returns a watcher for any [`PeerTrackerInfo`] changes.
-    pub fn info_watcher(&self) -> watch::Receiver<PeerTrackerInfo> {
+    pub(crate) fn info_watcher(&self) -> watch::Receiver<PeerTrackerInfo> {
         self.info_tx.subscribe()
     }
 
     /// Adds a peer ID.
     ///
     /// Returns `true` if peer was not known from before.
-    pub fn add_peer_id(&mut self, peer_id: PeerId) -> bool {
+    pub(crate) fn add_peer_id(&mut self, peer_id: PeerId) -> bool {
         match self.peers.entry(peer_id.to_owned()) {
             Entry::Vacant(entry) => {
                 entry.insert(Peer::default());
@@ -95,7 +113,7 @@ impl PeerTracker {
     }
 
     /// Add addresses of a peer.
-    pub fn add_addresses<I, A>(&mut self, peer_id: PeerId, addrs: I)
+    pub(crate) fn add_addresses<I, A>(&mut self, peer_id: PeerId, addrs: I)
     where
         I: IntoIterator<Item = A>,
         A: Borrow<Multiaddr>,
@@ -108,7 +126,7 @@ impl PeerTracker {
     }
 
     /// Sets peer as trusted.
-    pub fn set_trusted(&mut self, peer_id: PeerId, is_trusted: bool) {
+    pub(crate) fn set_trusted(&mut self, peer_id: PeerId, is_trusted: bool) {
         let peer = self.peers.entry(peer_id.to_owned()).or_default();
 
         if peer.trusted == is_trusted {
@@ -132,7 +150,7 @@ impl PeerTracker {
     }
 
     /// Add an active connection of a peer.
-    pub fn add_connection(
+    pub(crate) fn add_connection(
         &mut self,
         peer_id: PeerId,
         connection_id: ConnectionId,
@@ -160,7 +178,7 @@ impl PeerTracker {
     }
 
     /// Remove a connection from a peer.
-    pub fn remove_connection(&mut self, peer_id: PeerId, connection_id: ConnectionId) {
+    pub(crate) fn remove_connection(&mut self, peer_id: PeerId, connection_id: ConnectionId) {
         let Some(peer) = self.peers.get_mut(&peer_id) else {
             return;
         };
@@ -179,9 +197,14 @@ impl PeerTracker {
         }
     }
 
+    pub(crate) fn on_agent_version(&mut self, peer_id: PeerId, agent_version: &str) {
+        let peer = self.peers.entry(peer_id.to_owned()).or_default();
+        peer.kind = NodeKind::from_agent_version(agent_version);
+    }
+
     /// Returns true if peer is connected.
     #[allow(dead_code)]
-    pub fn is_connected(&self, peer_id: PeerId) -> bool {
+    pub(crate) fn is_connected(&self, peer_id: PeerId) -> bool {
         self.peers
             .get(&peer_id)
             .map(|peer| peer.is_connected())
@@ -190,13 +213,13 @@ impl PeerTracker {
 
     /// Returns the addresses of the peer.
     #[allow(dead_code)]
-    pub fn addresses(&self, peer_id: PeerId) -> Option<&[Multiaddr]> {
+    pub(crate) fn addresses(&self, peer_id: PeerId) -> Option<&[Multiaddr]> {
         Some(&self.peers.get(&peer_id)?.addrs[..])
     }
 
     /// Removes a peer.
     #[allow(dead_code)]
-    pub fn remove(&mut self, peer_id: PeerId) {
+    pub(crate) fn remove(&mut self, peer_id: PeerId) {
         if let Some(peer) = self.peers.remove(&peer_id) {
             for connection_id in peer.connections {
                 self.connection_to_peer.remove(&connection_id);
@@ -205,7 +228,7 @@ impl PeerTracker {
     }
 
     /// Returns connected peers.
-    pub fn connected_peers(&self) -> impl Iterator<Item = PeerId> + '_ {
+    pub(crate) fn connected_peers(&self) -> impl Iterator<Item = PeerId> + '_ {
         self.peers.iter().filter_map(|(peer_id, peer)| {
             if peer.is_connected() {
                 Some(*peer_id)
@@ -216,14 +239,14 @@ impl PeerTracker {
     }
 
     /// Returns all connections.
-    pub fn connections(&self) -> impl Iterator<Item = (ConnectionId, PeerId)> + '_ {
+    pub(crate) fn connections(&self) -> impl Iterator<Item = (ConnectionId, PeerId)> + '_ {
         self.connection_to_peer
             .iter()
             .map(|(&connection_id, &peer_id)| (connection_id, peer_id))
     }
 
     /// Returns one of the best peers.
-    pub fn best_peer(&self) -> Option<PeerId> {
+    pub(crate) fn best_peer(&self) -> Option<PeerId> {
         const MAX_PEER_SAMPLE: usize = 128;
 
         // TODO: Implement peer score and return the best.
@@ -241,7 +264,7 @@ impl PeerTracker {
     }
 
     /// Returns trusted peers
-    pub fn trusted_peers(&self) -> impl Iterator<Item = PeerId> + '_ {
+    pub(crate) fn trusted_peers(&self) -> impl Iterator<Item = PeerId> + '_ {
         self.peers.iter().filter_map(|(peer_id, peer)| {
             if peer.is_connected() && peer.trusted {
                 Some(*peer_id)
@@ -345,5 +368,33 @@ mod tests {
         let info = watcher.borrow_and_update().to_owned();
         assert_eq!(info.num_connected_peers, 1);
         assert_eq!(info.num_connected_trusted_peers, 0);
+    }
+
+    #[test]
+    fn node_kind() {
+        assert_eq!(
+            NodeKind::from_agent_version("lumina/celestia/0.14.0"),
+            NodeKind::Light
+        );
+
+        assert_eq!(
+            NodeKind::from_agent_version("celestia-node/celestia/bridge/v0.24.1/fb95d45"),
+            NodeKind::Bridge
+        );
+
+        assert_eq!(
+            NodeKind::from_agent_version("celestia-node/celestia/full/v0.24.1/fb95d45"),
+            NodeKind::Full
+        );
+
+        assert_eq!(
+            NodeKind::from_agent_version("celestia-node/celestia/light/v0.24.1/fb95d45"),
+            NodeKind::Light
+        );
+
+        assert_eq!(
+            NodeKind::from_agent_version("probelab-node/celestia/ant/v0.1.0"),
+            NodeKind::Unknown
+        );
     }
 }

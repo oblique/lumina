@@ -349,6 +349,9 @@ where
     fn on_identify_event(&mut self, ev: identify::Event) {
         match ev {
             identify::Event::Received { peer_id, info, .. } => {
+                self.peer_tracker
+                    .on_agent_version(peer_id, &info.agent_version);
+
                 // Inform Kademlia about the listening addresses
                 // TODO: Remove this when rust-libp2p#5103 is implemented
                 for addr in info.listen_addrs {
