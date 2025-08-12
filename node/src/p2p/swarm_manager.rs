@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -302,7 +302,7 @@ where
 
     #[instrument(skip_all, fields(peer_id = %peer_id))]
     pub(crate) fn peer_maybe_discovered(&mut self, peer_id: PeerId) {
-        if !self.peer_tracker.set_maybe_discovered(peer_id) {
+        if !self.peer_tracker.add_peer_id(peer_id) {
             return;
         }
 
@@ -333,15 +333,14 @@ where
         };
 
         self.peer_tracker
-            .set_connected(peer_id, connection_id, dialed_addr);
+            .add_connection(peer_id, connection_id, dialed_addr);
     }
 
     #[instrument(skip_all, fields(peer_id = %peer_id))]
     fn on_peer_disconnected(&mut self, peer_id: PeerId, connection_id: ConnectionId) {
-        if self
-            .peer_tracker
-            .set_maybe_disconnected(peer_id, connection_id)
-        {
+        self.peer_tracker.remove_connection(peer_id, connection_id);
+
+        if self.peer_tracker.is_connected(peer_id) {
             debug!("Peer disconnected");
         }
     }
@@ -411,10 +410,8 @@ where
             self.swarm.remove_listener(listener);
         }
 
-        for (_, ids) in self.peer_tracker.connections() {
-            for id in ids {
-                self.swarm.close_connection(id);
-            }
+        for (connection_id, _) in self.peer_tracker.connections() {
+            self.swarm.close_connection(connection_id);
         }
 
         // Waiting until all established connections closed.

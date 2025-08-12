@@ -162,7 +162,10 @@ where
         const MIN_HEAD_RESPONSES: usize = 2;
 
         // For now HEAD is requested from trusted peers only!
-        let peers = peer_tracker.trusted_n_peers(MAX_PEERS);
+        let peers = peer_tracker
+            .trusted_peers()
+            .take(MAX_PEERS)
+            .collect::<Vec<_>>();
 
         if peers.is_empty() {
             respond_to.maybe_send_err(P2pError::NoConnectedPeers);

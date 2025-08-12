@@ -863,7 +863,12 @@ where
                 respond_to.maybe_send(self.swarm.listeners());
             }
             P2pCmd::ConnectedPeers { respond_to } => {
-                let peers = self.swarm.context().peer_tracker.connected_peers();
+                let peers = self
+                    .swarm
+                    .context()
+                    .peer_tracker
+                    .connected_peers()
+                    .collect();
                 respond_to.maybe_send(peers);
             }
             P2pCmd::InitHeaderSub { head, channel } => {

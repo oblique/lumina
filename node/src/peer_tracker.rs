@@ -1,10 +1,9 @@
 //! Primitives related to tracking the state of peers in the network.
 
-use std::{borrow::Borrow, collections::HashMap};
+use std::borrow::Borrow;
+use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 
-use dashmap::mapref::entry::Entry;
-use dashmap::mapref::one::RefMut;
-use dashmap::DashMap;
 use libp2p::{swarm::ConnectionId, Multiaddr, PeerId};
 use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
@@ -16,7 +15,8 @@ use crate::events::{EventPublisher, NodeEvent};
 /// Keeps track various information about peers.
 #[derive(Debug)]
 pub struct PeerTracker {
-    peers: DashMap<PeerId, PeerInfo>,
+    peers: HashMap<PeerId, Peer>,
+    connection_to_peer: HashMap<ConnectionId, PeerId>,
     info_tx: watch::Sender<PeerTrackerInfo>,
     event_pub: EventPublisher,
 }
@@ -31,9 +31,9 @@ pub struct PeerTrackerInfo {
     pub num_connected_trusted_peers: u64,
 }
 
-#[derive(Debug)]
-struct PeerInfo {
-    state: PeerState,
+#[derive(Clone, Debug, Default)]
+struct Peer {
+    //state: PeerState,
     addrs: SmallVec<[Multiaddr; 4]>,
     connections: SmallVec<[ConnectionId; 1]>,
     //node_kind: NodeKind,
@@ -54,9 +54,15 @@ pub enum NodeKind {
     Light,
 }
 
-impl PeerInfo {
+impl Peer {
     fn is_connected(&self) -> bool {
-        matches!(self.state, PeerState::Connected)
+        !self.connections.is_empty()
+    }
+
+    fn add_address(&mut self, addr: Multiaddr) {
+        if !self.addrs.contains(&addr) {
+            self.addrs.push(addr);
+        }
     }
 }
 
@@ -64,7 +70,8 @@ impl PeerTracker {
     /// Constructs an empty PeerTracker.
     pub fn new(event_pub: EventPublisher) -> Self {
         PeerTracker {
-            peers: DashMap::new(),
+            peers: HashMap::new(),
+            connection_to_peer: HashMap::new(),
             info_tx: watch::channel(PeerTrackerInfo::default()).0,
             event_pub,
         }
@@ -80,74 +87,46 @@ impl PeerTracker {
         self.info_tx.subscribe()
     }
 
-    /// Sets peer as discovered if this is it's first appearance.
+    /// Adds a peer ID.
     ///
     /// Returns `true` if peer was not known from before.
-    pub fn set_maybe_discovered(&self, peer: PeerId) -> bool {
-        match self.peers.entry(peer) {
+    pub fn add_peer_id(&mut self, peer_id: PeerId) -> bool {
+        match self.peers.entry(peer_id.to_owned()) {
             Entry::Vacant(entry) => {
-                entry.insert(PeerInfo {
-                    state: PeerState::Discovered,
-                    addrs: SmallVec::new(),
-                    connections: SmallVec::new(),
-                    trusted: false,
-                    archival: false,
-                });
+                entry.insert(Peer::default());
                 true
             }
             Entry::Occupied(_) => false,
         }
     }
 
-    /// Get the `PeerInfo` of the peer.
-    ///
-    /// If peer is not found it is added as `PeerState::Discovered`.
-    fn get(&self, peer: PeerId) -> RefMut<'_, PeerId, PeerInfo> {
-        self.peers.entry(peer).or_insert_with(|| PeerInfo {
-            state: PeerState::Discovered,
-            addrs: SmallVec::new(),
-            connections: SmallVec::new(),
-            trusted: false,
-            archival: false,
-        })
-    }
-
-    /// Add an address for a peer.
-    pub fn add_addresses<I, A>(&mut self, peer: PeerId, addrs: I)
+    /// Add addresses of a peer.
+    pub fn add_addresses<I, A>(&mut self, peer_id: PeerId, addrs: I)
     where
         I: IntoIterator<Item = A>,
         A: Borrow<Multiaddr>,
     {
-        let mut state = self.get(peer);
+        let peer = self.peers.entry(peer_id.to_owned()).or_default();
 
         for addr in addrs {
-            let addr = addr.borrow();
-
-            if !state.addrs.contains(addr) {
-                state.addrs.push(addr.to_owned());
-            }
-        }
-
-        // Upgrade state
-        if state.state == PeerState::Discovered && !state.addrs.is_empty() {
-            state.state = PeerState::AddressesFound;
+            peer.add_address(addr.borrow().to_owned());
         }
     }
 
     /// Sets peer as trusted.
-    pub fn set_trusted(&mut self, peer: PeerId, is_trusted: bool) {
-        let mut peer_info = self.get(peer);
+    pub fn set_trusted(&mut self, peer_id: PeerId, is_trusted: bool) {
+        let peer = self.peers.entry(peer_id.to_owned()).or_default();
 
-        if peer_info.trusted == is_trusted {
+        if peer.trusted == is_trusted {
             // Nothing to be done
             return;
         }
 
-        peer_info.trusted = is_trusted;
+        peer.trusted = is_trusted;
 
         // If peer was already connected, then `num_connected_trusted_peers`
         // needs to be adjusted based on the new information.
-        if peer_info.is_connected() {
+        if peer.is_connected() {
             self.info_tx.send_modify(|tracker_info| {
                 if is_trusted {
                     tracker_info.num_connected_trusted_peers += 1;
@@ -158,98 +137,94 @@ impl PeerTracker {
         }
     }
 
-    /// Sets peer as connected.
-    pub fn set_connected(
+    /// Add an active connection of a peer.
+    pub fn add_connection(
         &mut self,
-        peer: PeerId,
+        peer_id: PeerId,
         connection_id: ConnectionId,
         address: impl Into<Option<Multiaddr>>,
     ) {
-        let mut peer_info = self.get(peer);
+        let peer = self.peers.entry(peer_id.to_owned()).or_default();
 
         if let Some(address) = address.into() {
-            if !peer_info.addrs.contains(&address) {
-                peer_info.addrs.push(address);
-            }
+            peer.add_address(address);
         }
 
-        peer_info.connections.push(connection_id);
+        peer.connections.push(connection_id);
+        self.connection_to_peer.insert(connection_id, peer_id);
 
         // If peer was not already connected from before
-        if !peer_info.is_connected() {
-            peer_info.state = PeerState::Connected;
-
-            increment_connected_peers(&self.info_tx, peer_info.trusted);
+        if !peer.is_connected() {
+            increment_connected_peers(&self.info_tx, peer.trusted);
 
             self.event_pub.send(NodeEvent::PeerConnected {
-                id: peer,
-                trusted: peer_info.trusted,
+                id: peer_id.to_owned(),
+                trusted: peer.trusted,
             });
         }
     }
 
-    /// Sets peer as disconnected if `connection_id` was the last connection.
-    ///
-    /// Returns `true` if was set to disconnected.
-    pub fn set_maybe_disconnected(&mut self, peer: PeerId, connection_id: ConnectionId) -> bool {
-        let mut peer_info = self.get(peer);
+    /// Remove a connection from a peer.
+    pub fn remove_connection(&mut self, peer_id: PeerId, connection_id: ConnectionId) {
+        let Some(peer) = self.peers.get_mut(&peer_id) else {
+            return;
+        };
 
-        peer_info.connections.retain(|id| *id != connection_id);
+        peer.connections.retain(|id| *id != connection_id);
+        self.connection_to_peer.remove(&connection_id);
 
         // If this is the last connection from the peer
-        if peer_info.connections.is_empty() {
-            if peer_info.addrs.is_empty() {
-                peer_info.state = PeerState::Discovered;
-            } else {
-                peer_info.state = PeerState::AddressesFound;
-            }
-
-            decrement_connected_peers(&self.info_tx, peer_info.trusted);
+        if peer.is_connected() {
+            decrement_connected_peers(&self.info_tx, peer.trusted);
 
             self.event_pub.send(NodeEvent::PeerDisconnected {
-                id: peer,
-                trusted: peer_info.trusted,
+                id: peer_id.to_owned(),
+                trusted: peer.trusted,
             });
-
-            true
-        } else {
-            false
         }
     }
 
     /// Returns true if peer is connected.
     #[allow(dead_code)]
-    pub fn is_connected(&self, peer: PeerId) -> bool {
-        self.get(peer).is_connected()
+    pub fn is_connected(&self, peer_id: PeerId) -> bool {
+        self.peers
+            .get(&peer_id)
+            .map(|peer| peer.is_connected())
+            .unwrap_or(false)
     }
 
     /// Returns the addresses of the peer.
     #[allow(dead_code)]
-    pub fn addresses(&self, peer: PeerId) -> SmallVec<[Multiaddr; 4]> {
-        self.get(peer).addrs.clone()
+    pub fn addresses(&self, peer_id: PeerId) -> Option<&[Multiaddr]> {
+        Some(&self.peers.get(&peer_id)?.addrs[..])
     }
 
     /// Removes a peer.
     #[allow(dead_code)]
-    pub fn remove(&self, peer: PeerId) {
-        self.peers.remove(&peer);
+    pub fn remove(&mut self, peer_id: PeerId) {
+        if let Some(peer) = self.peers.remove(&peer_id) {
+            for connection_id in peer.connections {
+                self.connection_to_peer.remove(&connection_id);
+            }
+        }
     }
 
     /// Returns connected peers.
-    pub fn connected_peers(&self) -> Vec<PeerId> {
-        self.peers
-            .iter()
-            .filter(|pair| pair.value().is_connected())
-            .map(|pair| pair.key().to_owned())
-            .collect()
+    pub fn connected_peers(&self) -> impl Iterator<Item = PeerId> + '_ {
+        self.peers.iter().filter_map(|(peer_id, peer)| {
+            if peer.is_connected() {
+                Some(*peer_id)
+            } else {
+                None
+            }
+        })
     }
 
-    pub fn connections(&self) -> Vec<(PeerId, SmallVec<[ConnectionId; 1]>)> {
-        self.peers
+    /// Returns all connections.
+    pub fn connections(&self) -> impl Iterator<Item = (ConnectionId, PeerId)> + '_ {
+        self.connection_to_peer
             .iter()
-            .filter(|pair| pair.value().is_connected())
-            .map(|pair| (pair.key().to_owned(), pair.value().connections.clone()))
-            .collect()
+            .map(|(&connection_id, &peer_id)| (connection_id, peer_id))
     }
 
     /// Returns one of the best peers.
@@ -260,38 +235,25 @@ impl PeerTracker {
         let mut peers = self
             .peers
             .iter()
-            .filter(|pair| pair.value().is_connected())
+            .filter(|(_, peer)| peer.is_connected())
             .take(MAX_PEER_SAMPLE)
-            .map(|pair| pair.key().to_owned())
+            .map(|(peer_id, peer)| peer_id)
             .collect::<SmallVec<[_; MAX_PEER_SAMPLE]>>();
 
         peers.shuffle(&mut rand::thread_rng());
 
-        peers.first().copied()
+        peers.first().copied().copied()
     }
 
-    /// Returns up to N amount of best peers.
-    #[allow(dead_code)]
-    pub fn best_n_peers(&self, limit: usize) -> Vec<PeerId> {
-        // TODO: Implement peer score and return the best N peers.
-        self.peers
-            .iter()
-            .filter(|pair| pair.value().is_connected())
-            .take(limit)
-            .map(|pair| pair.key().to_owned())
-            // collect instead of returning an iter to not block the dashmap
-            .collect()
-    }
-
-    /// Returns up to N amount of trusted peers.
-    pub fn trusted_n_peers(&self, limit: usize) -> Vec<PeerId> {
-        self.peers
-            .iter()
-            .filter(|pair| pair.value().is_connected() && pair.value().trusted)
-            .take(limit)
-            .map(|pair| pair.key().to_owned())
-            // collect instead of returning an iter to not block the dashmap
-            .collect()
+    /// Returns trusted peers
+    pub fn trusted_peers(&self) -> impl Iterator<Item = PeerId> + '_ {
+        self.peers.iter().filter_map(|(peer_id, peer)| {
+            if peer.is_connected() && peer.trusted {
+                Some(*peer_id)
+            } else {
+                None
+            }
+        })
     }
 }
 
