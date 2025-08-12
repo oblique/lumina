@@ -1,45 +1,362 @@
+use std::collections::HashMap;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use blockstore::Blockstore;
+use futures::StreamExt;
+use libp2p::swarm::NetworkInfo;
 use libp2p::{
     connection_limits::ConnectionLimits,
-    core::{transport::PortUse, Endpoint},
+    core::{transport::PortUse, ConnectedPoint, Endpoint},
     identify,
     kad::{self, RecordKey},
+    multiaddr::Protocol,
+    ping,
     swarm::{
-        dummy, ConnectionDenied, ConnectionId, FromSwarm, NetworkBehaviour, THandler,
-        THandlerInEvent, THandlerOutEvent, ToSwarm,
+        dial_opts::{DialOpts, PeerCondition},
+        dummy, ConnectionDenied, ConnectionId, DialError, FromSwarm, NetworkBehaviour, SwarmEvent,
+        THandler, THandlerInEvent, THandlerOutEvent, ToSwarm,
     },
     Multiaddr, PeerId, Swarm,
 };
+use lumina_utils::time::Interval;
 use multihash_codetable::{Code, MultihashDigest};
+use tokio::select;
+use tokio::sync::watch;
+use tracing::{debug, instrument, trace, warn};
 use void::Void;
 
-use crate::p2p::Behaviour;
-use crate::peer_tracker::PeerTracker;
+use crate::events::{EventPublisher, NodeEvent};
+use crate::p2p::{Behaviour, BehaviourEvent, Result};
+use crate::peer_tracker::{PeerTracker, PeerTrackerInfo};
 use crate::store::Store;
 
+// Minimal number of peers that we want to maintain connection to.
+// If we have fewer peers than that, we will try to reconnect / discover
+// more aggresively.
+const MIN_CONNECTED_PEERS: u64 = 4;
+
 /// NOTE: This does not implement `NetworkBehaviour` on purpose.
-pub(crate) struct PeerManager {
-    //kademlia: kad::Behaviour<kad::store::MemoryStore>,
-    //    inner: imp::Behaviour,
-    pub(crate) peer_tracker: PeerTracker,
+pub(crate) struct SwarmManager<B, S>
+where
+    B: Blockstore + 'static,
+    S: Store + 'static,
+{
+    swarm: Swarm<Behaviour<B, S>>,
+    event_pub: EventPublisher,
+    bootnodes: HashMap<PeerId, Vec<Multiaddr>>,
+    peer_tracker_info_watcher: watch::Receiver<PeerTrackerInfo>,
+    kademlia_interval: Interval,
 }
 
-impl PeerManager {
-    pub(crate) fn new(peer_tracker: PeerTracker) -> PeerManager {
-        PeerManager { peer_tracker }
+impl<B, S> SwarmManager<B, S>
+where
+    B: Blockstore,
+    S: Store,
+{
+    pub(crate) async fn new(
+        swarm: Swarm<Behaviour<B, S>>,
+        event_pub: EventPublisher,
+        peer_tracker: &PeerTracker,
+        bootnodes: HashMap<PeerId, Vec<Multiaddr>>,
+    ) -> SwarmManager<B, S> {
+        let peer_tracker_info_watcher = peer_tracker.info_watcher();
+        let kademlia_interval = Interval::new(Duration::from_secs(30)).await;
+
+        let mut manager = SwarmManager {
+            swarm,
+            event_pub,
+            bootnodes,
+            peer_tracker_info_watcher,
+            kademlia_interval,
+        };
+
+        manager.bootstrap();
+
+        manager
     }
 
-    pub(crate) fn on_kademlia_event(&mut self, ev: kad::Event) {}
+    pub(crate) fn behaviour(&self) -> &Behaviour<B, S> {
+        self.swarm.behaviour()
+    }
 
-    pub(crate) fn on_identify_event(&mut self, ev: identify::Event) {}
+    pub(crate) fn behaviour_mut(&mut self) -> &mut Behaviour<B, S> {
+        self.swarm.behaviour_mut()
+    }
 
-    pub(crate) async fn poll<B, S>(&mut self, swarm: &mut Swarm<Behaviour<B, S>>)
-    where
-        B: Blockstore,
-        S: Store,
-    {
+    pub(crate) fn bootstrap(&mut self) {
+        self.event_pub.send(NodeEvent::ConnectingToBootnodes);
+
+        for (peer_id, addrs) in &self.bootnodes {
+            let dial_opts = DialOpts::peer_id(*peer_id)
+                .addresses(addrs.clone())
+                // Tell Swarm not to dial if peer is already connected or there
+                // is an ongoing dialing.
+                .condition(PeerCondition::DisconnectedAndNotDialing)
+                .build();
+
+            if let Err(e) = self.swarm.dial(dial_opts) {
+                if !matches!(e, DialError::DialPeerConditionFalse(_)) {
+                    warn!("Failed to dial on {addrs:?}: {e}");
+                }
+            }
+        }
+
+        // trigger kademlia bootstrap
+        if self.swarm.behaviour_mut().kademlia.bootstrap().is_err() {
+            warn!("Can't run kademlia bootstrap, no known peers");
+        }
+    }
+
+    pub(crate) fn network_info(&self) -> NetworkInfo {
+        self.swarm.network_info()
+    }
+
+    pub(crate) fn local_peer_id(&self) -> PeerId {
+        self.swarm.local_peer_id().to_owned()
+    }
+
+    pub(crate) fn listeners(&self) -> Vec<Multiaddr> {
+        let local_peer_id = self.local_peer_id();
+
+        self.swarm
+            .listeners()
+            .cloned()
+            .map(|mut ma| {
+                if !ma.protocol_stack().any(|protocol| protocol == "p2p") {
+                    ma.push(Protocol::P2p(local_peer_id))
+                }
+                ma
+            })
+            .collect()
+    }
+
+    pub(crate) async fn poll(
+        &mut self,
+        peer_tracker: &mut PeerTracker,
+    ) -> Result<SwarmEvent<BehaviourEvent<B, S>>> {
+        /*
+                     *
+
+        let key = peer_manager::topic_to_dht_key("/full/v0.1.0");
+        let key = peer_manager::topic_to_dht_key("/archival/v0.1.0");
+                    let id = self
+                        .swarm
+                        .behaviour_mut()
+                        .kademlia
+                        .get_closest_peers(key.to_vec());
+
+
+                    let id = self.swarm.behaviour_mut().kademlia.get_providers(key.clone());
+                     *
+                     */
+
+        loop {
+            select! {
+                _ = self.peer_tracker_info_watcher.changed() => {
+                    if self.peer_tracker_info_watcher.borrow().num_connected_peers == 0 {
+                        warn!("All peers disconnected");
+                        self.bootstrap();
+                    }
+                }
+                _ = self.kademlia_interval.tick() => {
+                    if peer_tracker.info().num_connected_peers < MIN_CONNECTED_PEERS
+                    {
+                        self.bootstrap();
+                    }
+                }
+                ev = self.swarm.select_next_some() => return Ok(ev),
+            }
+        }
+    }
+
+    async fn on_swarm_event(
+        &mut self,
+        peer_tracker: &mut PeerTracker,
+        ev: SwarmEvent<BehaviourEvent<B, S>>,
+    ) -> Option<SwarmEvent<BehaviourEvent<B, S>>> {
+        match ev {
+            SwarmEvent::Behaviour(ev) => match ev {
+                BehaviourEvent::Identify(ev) => self.on_identify_event(ev),
+                BehaviourEvent::Kademlia(ev) => self.on_kademlia_event(peer_tracker, ev),
+                BehaviourEvent::Ping(ev) => self.on_ping_event(ev),
+                ev => return Some(SwarmEvent::Behaviour(ev)),
+            },
+            SwarmEvent::ConnectionEstablished {
+                peer_id,
+                connection_id,
+                endpoint,
+                ..
+            } => {
+                self.on_peer_connected(peer_tracker, peer_id, connection_id, endpoint);
+            }
+            SwarmEvent::ConnectionClosed {
+                peer_id,
+                connection_id,
+                ..
+            } => {
+                self.on_peer_disconnected(peer_tracker, peer_id, connection_id);
+            }
+            ev => return Some(ev),
+        }
+
+        None
+    }
+
+    #[instrument(skip_all, fields(peer_id = %peer_id))]
+    pub(crate) fn peer_maybe_discovered(
+        &mut self,
+        peer_tracker: &mut PeerTracker,
+        peer_id: PeerId,
+    ) {
+        // TODO move to discovery
+        if !peer_tracker.set_maybe_discovered(peer_id) {
+            return;
+        }
+
+        debug!("Peer discovered");
+    }
+
+    #[instrument(skip_all, fields(peer_id = %peer_id))]
+    fn on_peer_connected(
+        &mut self,
+        peer_tracker: &mut PeerTracker,
+        peer_id: PeerId,
+        connection_id: ConnectionId,
+        endpoint: ConnectedPoint,
+    ) {
+        debug!("Peer connected");
+
+        // Inform PeerTracker about the dialed address.
+        //
+        // We do this because Kademlia send commands to Swarm
+        // for dialing a peer and we may not have that address
+        // in PeerTracker.
+        let dialed_addr = match endpoint {
+            ConnectedPoint::Dialer {
+                address,
+                role_override: Endpoint::Dialer,
+                ..
+            } => Some(address),
+            _ => None,
+        };
+
+        // TODO maybe move to discovery
+        peer_tracker.set_connected(peer_id, connection_id, dialed_addr);
+    }
+
+    #[instrument(skip_all, fields(peer_id = %peer_id))]
+    fn on_peer_disconnected(
+        &mut self,
+        peer_tracker: &mut PeerTracker,
+        peer_id: PeerId,
+        connection_id: ConnectionId,
+    ) {
+        if peer_tracker.set_maybe_disconnected(peer_id, connection_id) {
+            debug!("Peer disconnected");
+        }
+    }
+
+    #[instrument(level = "trace", skip(self))]
+    fn on_identify_event(&mut self, ev: identify::Event) {
+        match ev {
+            identify::Event::Received { peer_id, info, .. } => {
+                // Inform Kademlia about the listening addresses
+                // TODO: Remove this when rust-libp2p#5103 is implemented
+                for addr in info.listen_addrs {
+                    self.swarm
+                        .behaviour_mut()
+                        .kademlia
+                        .add_address(&peer_id, addr);
+                }
+            }
+            _ => trace!("Unhandled identify event"),
+        }
+    }
+
+    #[instrument(level = "trace", skip(self))]
+    fn on_kademlia_event(&mut self, peer_tracker: &mut PeerTracker, ev: kad::Event) {
+        match ev {
+            kad::Event::RoutingUpdated {
+                peer, addresses, ..
+            } => {
+                peer_tracker.add_addresses(peer, addresses.iter());
+            }
+            kad::Event::OutboundQueryProgressed { result, .. } => {
+                if let kad::QueryResult::GetProviders(Ok(providers)) = result {
+                    if let kad::GetProvidersOk::FoundProviders { providers, .. } = providers {
+                        for p in providers {
+                            // TODO
+                        }
+                    }
+                }
+            }
+            _ => trace!("Unhandled Kademlia event"),
+        }
+    }
+
+    #[instrument(level = "debug", skip_all)]
+    fn on_ping_event(&mut self, ev: ping::Event) {
+        match ev.result {
+            Ok(dur) => debug!(
+                "Ping success: peer: {}, connection_id: {}, time: {:?}",
+                ev.peer, ev.connection, dur
+            ),
+            Err(e) => {
+                debug!(
+                    "Ping failure: peer: {}, connection_id: {}, error: {}",
+                    &ev.peer, &ev.connection, e
+                );
+                self.swarm.close_connection(ev.connection);
+            }
+        }
+    }
+
+    pub(crate) async fn stop(&mut self, peer_tracker: &mut PeerTracker) {
+        self.swarm
+            .behaviour_mut()
+            .connection_control
+            .set_stopping(true);
+        self.swarm.behaviour_mut().header_ex.stop();
+
+        // TODO
+        /*
+        for listener in self.listeners.drain(..) {
+            self.swarm.remove_listener(listener);
+        }
+                */
+
+        for (_, ids) in peer_tracker.connections() {
+            for id in ids {
+                self.swarm.close_connection(id);
+            }
+        }
+
+        // Waiting until all established connections closed.
+        while self
+            .swarm
+            .network_info()
+            .connection_counters()
+            .num_established()
+            > 0
+        {
+            match self.swarm.select_next_some().await {
+                // We may receive this if connection was established just before we trigger stop.
+                SwarmEvent::ConnectionEstablished { connection_id, .. } => {
+                    // We immediately close the connection in this case.
+                    self.swarm.close_connection(connection_id);
+                }
+                SwarmEvent::ConnectionClosed {
+                    peer_id,
+                    connection_id,
+                    ..
+                } => {
+                    // This will generate the PeerDisconnected events.
+                    self.on_peer_disconnected(peer_tracker, peer_id, connection_id);
+                }
+                _ => {}
+            }
+        }
     }
 }
 
