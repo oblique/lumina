@@ -50,12 +50,12 @@ pub(crate) struct SwarmBehaviour<B>
 where
     B: NetworkBehaviour + 'static,
 {
-    pub(crate) connection_control: connection_control::Behaviour,
-    pub(crate) autonat: autonat::Behaviour,
-    pub(crate) ping: ping::Behaviour,
-    pub(crate) identify: identify::Behaviour,
-    pub(crate) kademlia: kad::Behaviour<kad::store::MemoryStore>,
-    pub(crate) behaviour: B,
+    connection_control: connection_control::Behaviour,
+    autonat: autonat::Behaviour,
+    ping: ping::Behaviour,
+    identify: identify::Behaviour,
+    kademlia: kad::Behaviour<kad::store::MemoryStore>,
+    behaviour: B,
 }
 
 pub(crate) struct SwarmManager<B>
@@ -394,12 +394,9 @@ where
             .connection_control
             .set_stopping(true);
 
-        // TODO
-        /*
         for listener in self.listeners.drain(..) {
             self.swarm.remove_listener(listener);
         }
-                */
 
         for (_, ids) in peer_tracker.connections() {
             for id in ids {
