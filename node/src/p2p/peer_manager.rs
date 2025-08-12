@@ -8,8 +8,12 @@ use libp2p::swarm::NetworkInfo;
 use libp2p::{
     autonat,
     connection_limits::ConnectionLimits,
-    core::{transport::PortUse, ConnectedPoint, Endpoint},
+    core::{
+        transport::{ListenerId, PortUse},
+        ConnectedPoint, Endpoint,
+    },
     identify,
+    identity::Keypair,
     kad::{self, RecordKey},
     multiaddr::Protocol,
     ping,
@@ -22,16 +26,19 @@ use libp2p::{
 };
 use lumina_utils::time::Interval;
 use multihash_codetable::{Code, MultihashDigest};
+use smallvec::SmallVec;
 use tokio::select;
 use tokio::sync::watch;
-use tracing::{debug, instrument, trace, warn};
+use tracing::{debug, error, instrument, trace, warn};
 use void::Void;
 
 use crate::events::{EventPublisher, NodeEvent};
 use crate::p2p::connection_control;
+use crate::p2p::swarm::new_swarm;
 use crate::p2p::{Behaviour, BehaviourEvent, Result};
 use crate::peer_tracker::{PeerTracker, PeerTrackerInfo};
 use crate::store::Store;
+use crate::utils::{celestia_protocol_id, MultiaddrExt};
 
 // Minimal number of peers that we want to maintain connection to.
 // If we have fewer peers than that, we will try to reconnect / discover
@@ -58,6 +65,7 @@ where
     swarm: Swarm<SwarmBehaviour<B>>,
     event_pub: EventPublisher,
     bootnodes: HashMap<PeerId, Vec<Multiaddr>>,
+    listeners: SmallVec<[ListenerId; 1]>,
     peer_tracker_info_watcher: watch::Receiver<PeerTrackerInfo>,
     kademlia_interval: Interval,
 }
@@ -67,25 +75,79 @@ where
     B: NetworkBehaviour,
 {
     pub(crate) async fn new(
-        swarm: Swarm<SwarmBehaviour<B>>,
+        network_id: &str,
+        keypair: &Keypair,
+        bootnodes: &[Multiaddr],
+        listen_on: &[Multiaddr],
+        peer_tracker: &mut PeerTracker,
         event_pub: EventPublisher,
-        peer_tracker: &PeerTracker,
-        bootnodes: HashMap<PeerId, Vec<Multiaddr>>,
-    ) -> SwarmManager<B> {
+        behaviour: B,
+    ) -> Result<SwarmManager<B>> {
+        let local_peer_id = PeerId::from(keypair.public());
+
+        let connection_control = connection_control::Behaviour::new();
+        let autonat = autonat::Behaviour::new(local_peer_id, autonat::Config::default());
+        let ping = ping::Behaviour::new(ping::Config::default());
+        let kademlia = init_kademlia(network_id, keypair, bootnodes, listen_on)?;
+
+        let agent_version = format!("lumina/{}/{}", network_id, env!("CARGO_PKG_VERSION"));
+        let identify_config = identify::Config::new(String::new(), keypair.public())
+            .with_agent_version(agent_version);
+        let identify = identify::Behaviour::new(identify_config);
+
+        let behaviour = SwarmBehaviour {
+            connection_control,
+            autonat,
+            ping,
+            identify,
+            kademlia,
+            behaviour,
+        };
+
+        let mut swarm = new_swarm(keypair.to_owned(), behaviour).await?;
+        let mut listeners = SmallVec::new();
+
+        for addr in listen_on {
+            match swarm.listen_on(addr.clone()) {
+                Ok(id) => listeners.push(id),
+                Err(e) => error!("Failed to listen on {addr}: {e}"),
+            }
+        }
+
+        let mut bootnodes_map = HashMap::<_, Vec<_>>::new();
+
+        for addr in bootnodes {
+            let peer_id = addr.peer_id().expect("multiaddr already validated");
+            bootnodes_map
+                .entry(peer_id)
+                .or_default()
+                .push(addr.to_owned());
+        }
+
+        for (peer_id, addrs) in bootnodes_map.iter_mut() {
+            addrs.sort();
+            addrs.dedup();
+            addrs.shrink_to_fit();
+
+            // Bootstrap peers are always trusted
+            peer_tracker.set_trusted(*peer_id, true);
+        }
+
         let peer_tracker_info_watcher = peer_tracker.info_watcher();
         let kademlia_interval = Interval::new(Duration::from_secs(30)).await;
 
         let mut manager = SwarmManager {
             swarm,
             event_pub,
-            bootnodes,
+            bootnodes: bootnodes_map,
+            listeners,
             peer_tracker_info_watcher,
             kademlia_interval,
         };
 
         manager.bootstrap();
 
-        manager
+        Ok(manager)
     }
 
     pub(crate) fn behaviour(&self) -> &B {
@@ -371,6 +433,33 @@ where
             }
         }
     }
+}
+
+fn init_kademlia(
+    network_id: &str,
+    keypair: &Keypair,
+    bootnodes: &[Multiaddr],
+    listen_on: &[Multiaddr],
+) -> Result<kad::Behaviour<kad::store::MemoryStore>> {
+    let local_peer_id = PeerId::from(keypair.public());
+    let store = kad::store::MemoryStore::new(local_peer_id);
+
+    let protocol_id = celestia_protocol_id(network_id, "/kad/1.0.0");
+    let config = kad::Config::new(protocol_id);
+
+    let mut kademlia = kad::Behaviour::with_config(local_peer_id, store, config);
+
+    for addr in bootnodes {
+        if let Some(peer_id) = addr.peer_id() {
+            kademlia.add_address(&peer_id, addr.to_owned());
+        }
+    }
+
+    if !listen_on.is_empty() {
+        kademlia.set_mode(Some(kad::Mode::Server));
+    }
+
+    Ok(kademlia)
 }
 
 /// Converts a topic to `RecordKey`.

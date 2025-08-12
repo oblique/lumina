@@ -715,7 +715,6 @@ where
 {
     cancellation_token: CancellationToken,
     swarm: SwarmManager<Behaviour<B, S>>,
-    listeners: SmallVec<[ListenerId; 1]>,
     header_sub_topic_hash: TopicHash,
     bad_encoding_fraud_sub_topic: TopicHash,
     cmd_rx: mpsc::Receiver<P2pCmd>,
@@ -743,24 +742,11 @@ where
         cmd_rx: mpsc::Receiver<P2pCmd>,
         mut peer_tracker: PeerTracker,
     ) -> Result<Self, P2pError> {
-        let local_peer_id = PeerId::from(args.local_keypair.public());
-
-        let connection_control = connection_control::Behaviour::new();
-        let autonat = autonat::Behaviour::new(local_peer_id, autonat::Config::default());
-        let ping = ping::Behaviour::new(ping::Config::default());
-
-        let agent_version = format!("lumina/{}/{}", args.network_id, env!("CARGO_PKG_VERSION"));
-        let identify = identify::Behaviour::new(
-            identify::Config::new(String::new(), args.local_keypair.public())
-                .with_agent_version(agent_version),
-        );
-
         let header_sub_topic = gossipsub_ident_topic(&args.network_id, "/header-sub/v0.0.1");
         let bad_encoding_fraud_sub_topic =
             fraudsub_ident_topic(BadEncodingFraudProof::TYPE, &args.network_id);
         let gossipsub = init_gossipsub(&args, [&header_sub_topic, &bad_encoding_fraud_sub_topic])?;
 
-        let kademlia = init_kademlia(&args)?;
         let bitswap = init_bitswap(
             args.blockstore.clone(),
             args.store.clone(),
@@ -772,51 +758,28 @@ where
             header_store: args.store.clone(),
         });
 
-        let behaviour = SwarmBehaviour {
-            connection_control,
-            autonat,
-            ping,
-            identify,
-            kademlia,
-            behaviour: Behaviour {
-                bitswap,
-                gossipsub,
-                header_ex,
-            },
+        let behaviour = Behaviour {
+            bitswap,
+            gossipsub,
+            header_ex,
         };
 
-        let mut swarm = new_swarm(args.local_keypair, behaviour).await?;
-        let mut listeners = SmallVec::new();
-
-        for addr in args.listen_on {
-            match swarm.listen_on(addr.clone()) {
-                Ok(id) => listeners.push(id),
-                Err(e) => error!("Failed to listen on {addr}: {e}"),
-            }
-        }
-
-        let mut bootnodes = HashMap::<_, Vec<_>>::new();
-
-        for addr in args.bootnodes {
-            let peer_id = addr.peer_id().expect("multiaddr already validated");
-            bootnodes.entry(peer_id).or_default().push(addr);
-        }
-
-        for (peer_id, addrs) in bootnodes.iter_mut() {
-            addrs.sort();
-            addrs.dedup();
-            addrs.shrink_to_fit();
-
-            // Bootstrap peers are always trusted
-            peer_tracker.set_trusted(*peer_id, true);
-        }
+        let swarm = SwarmManager::new(
+            &args.network_id,
+            &args.local_keypair,
+            &args.bootnodes,
+            &args.listen_on,
+            &mut peer_tracker,
+            args.event_pub.clone(),
+            behaviour,
+        )
+        .await?;
 
         Ok(Worker {
             cancellation_token,
-            swarm: SwarmManager::new(swarm, args.event_pub.clone(), &peer_tracker, bootnodes).await,
+            swarm,
             cmd_rx,
             peer_tracker,
-            listeners,
             bad_encoding_fraud_sub_topic: bad_encoding_fraud_sub_topic.hash(),
             header_sub_topic_hash: header_sub_topic.hash(),
             header_sub_state: None,
@@ -1163,32 +1126,6 @@ where
     }
 
     Ok(gossipsub)
-}
-
-fn init_kademlia<B, S>(args: &P2pArgs<B, S>) -> Result<kad::Behaviour<kad::store::MemoryStore>>
-where
-    B: Blockstore,
-    S: Store,
-{
-    let local_peer_id = PeerId::from(args.local_keypair.public());
-    let store = kad::store::MemoryStore::new(local_peer_id);
-
-    let protocol_id = celestia_protocol_id(&args.network_id, "/kad/1.0.0");
-    let config = kad::Config::new(protocol_id);
-
-    let mut kademlia = kad::Behaviour::with_config(local_peer_id, store, config);
-
-    for addr in &args.bootnodes {
-        if let Some(peer_id) = addr.peer_id() {
-            kademlia.add_address(&peer_id, addr.to_owned());
-        }
-    }
-
-    if !args.listen_on.is_empty() {
-        kademlia.set_mode(Some(kad::Mode::Server));
-    }
-
-    Ok(kademlia)
 }
 
 fn init_bitswap<B, S>(
