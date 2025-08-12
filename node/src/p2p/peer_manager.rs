@@ -158,7 +158,7 @@ where
         &mut self.swarm.behaviour_mut().behaviour
     }
 
-    pub(crate) fn bootstrap(&mut self) {
+    fn bootstrap(&mut self) {
         self.event_pub.send(NodeEvent::ConnectingToBootnodes);
 
         for (peer_id, addrs) in &self.bootnodes {
@@ -285,7 +285,6 @@ where
         peer_tracker: &mut PeerTracker,
         peer_id: PeerId,
     ) {
-        // TODO move to discovery
         if !peer_tracker.set_maybe_discovered(peer_id) {
             return;
         }
@@ -317,7 +316,6 @@ where
             _ => None,
         };
 
-        // TODO maybe move to discovery
         peer_tracker.set_connected(peer_id, connection_id, dialed_addr);
     }
 

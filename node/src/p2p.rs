@@ -696,7 +696,6 @@ impl Drop for P2p {
     }
 }
 
-/// Our network behaviour.
 #[derive(NetworkBehaviour)]
 struct Behaviour<B, S>
 where
