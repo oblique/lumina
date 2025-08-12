@@ -69,6 +69,7 @@ use crate::block_ranges::BlockRange;
 use crate::events::{EventPublisher, NodeEvent};
 use crate::p2p::header_ex::{HeaderExBehaviour, HeaderExConfig};
 use crate::p2p::header_session::HeaderSession;
+use crate::p2p::peer_manager::SwarmBehaviour;
 use crate::p2p::peer_manager::SwarmManager;
 use crate::p2p::shwap::{convert_cid, get_block_container, ShwapMultihasher};
 use crate::p2p::swarm::new_swarm;
@@ -702,14 +703,9 @@ where
     B: Blockstore + 'static,
     S: Store + 'static,
 {
-    connection_control: connection_control::Behaviour,
-    autonat: autonat::Behaviour,
     bitswap: beetswap::Behaviour<MAX_MH_SIZE, B>,
-    ping: ping::Behaviour,
-    identify: identify::Behaviour,
     header_ex: HeaderExBehaviour<S>,
     gossipsub: gossipsub::Behaviour,
-    kademlia: kad::Behaviour<kad::store::MemoryStore>,
 }
 
 struct Worker<B, S>
@@ -718,7 +714,7 @@ where
     S: Store + 'static,
 {
     cancellation_token: CancellationToken,
-    swarm: SwarmManager<B, S>,
+    swarm: SwarmManager<Behaviour<B, S>>,
     listeners: SmallVec<[ListenerId; 1]>,
     header_sub_topic_hash: TopicHash,
     bad_encoding_fraud_sub_topic: TopicHash,
@@ -776,15 +772,17 @@ where
             header_store: args.store.clone(),
         });
 
-        let behaviour = Behaviour {
+        let behaviour = SwarmBehaviour {
             connection_control,
             autonat,
-            bitswap,
             ping,
             identify,
-            gossipsub,
-            header_ex,
             kademlia,
+            behaviour: Behaviour {
+                bitswap,
+                gossipsub,
+                header_ex,
+            },
         };
 
         let mut swarm = new_swarm(args.local_keypair, behaviour).await?;
@@ -844,8 +842,8 @@ where
                 res = self.swarm.poll(&mut self.peer_tracker) => {
                     match res {
                         Ok(ev) => {
-                            if let Err(e) = self.on_swarm_event(ev).await {
-                                warn!("Failure while handling swarm event: {e}");
+                            if let Err(e) = self.on_behaviour_event(ev).await {
+                                warn!("Failure while handling behaviour event: {e}");
                             }
                         }
                         Err(e) => warn!("Failure while polling SwarmManager: {e}"),
@@ -859,6 +857,7 @@ where
             }
         }
 
+        self.swarm.behaviour_mut().header_ex.stop();
         self.swarm.stop(&mut self.peer_tracker).await;
     }
 
@@ -877,21 +876,11 @@ where
         }
     }
 
-    async fn on_swarm_event(&mut self, ev: SwarmEvent<BehaviourEvent<B, S>>) -> Result<()> {
+    async fn on_behaviour_event(&mut self, ev: BehaviourEvent<B, S>) -> Result<()> {
         match ev {
-            SwarmEvent::Behaviour(ev) => match ev {
-                BehaviourEvent::Gossipsub(ev) => self.on_gossip_sub_event(ev).await,
-                BehaviourEvent::Bitswap(ev) => self.on_bitswap_event(ev).await,
-                BehaviourEvent::Autonat(_)
-                | BehaviourEvent::ConnectionControl(_)
-                | BehaviourEvent::HeaderEx(_) => {}
-
-                // TODO
-                BehaviourEvent::Identify(_)
-                | BehaviourEvent::Kademlia(_)
-                | BehaviourEvent::Ping(_) => {}
-            },
-            _ => {}
+            BehaviourEvent::Gossipsub(ev) => self.on_gossip_sub_event(ev).await,
+            BehaviourEvent::Bitswap(ev) => self.on_bitswap_event(ev).await,
+            BehaviourEvent::HeaderEx(_) => {}
         }
 
         Ok(())

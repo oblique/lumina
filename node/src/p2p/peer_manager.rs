@@ -6,6 +6,7 @@ use blockstore::Blockstore;
 use futures::StreamExt;
 use libp2p::swarm::NetworkInfo;
 use libp2p::{
+    autonat,
     connection_limits::ConnectionLimits,
     core::{transport::PortUse, ConnectedPoint, Endpoint},
     identify,
@@ -27,6 +28,7 @@ use tracing::{debug, instrument, trace, warn};
 use void::Void;
 
 use crate::events::{EventPublisher, NodeEvent};
+use crate::p2p::connection_control;
 use crate::p2p::{Behaviour, BehaviourEvent, Result};
 use crate::peer_tracker::{PeerTracker, PeerTrackerInfo};
 use crate::store::Store;
@@ -36,30 +38,40 @@ use crate::store::Store;
 // more aggresively.
 const MIN_CONNECTED_PEERS: u64 = 4;
 
-/// NOTE: This does not implement `NetworkBehaviour` on purpose.
-pub(crate) struct SwarmManager<B, S>
+#[derive(NetworkBehaviour)]
+pub(crate) struct SwarmBehaviour<B>
 where
-    B: Blockstore + 'static,
-    S: Store + 'static,
+    B: NetworkBehaviour + 'static,
 {
-    swarm: Swarm<Behaviour<B, S>>,
+    pub(crate) connection_control: connection_control::Behaviour,
+    pub(crate) autonat: autonat::Behaviour,
+    pub(crate) ping: ping::Behaviour,
+    pub(crate) identify: identify::Behaviour,
+    pub(crate) kademlia: kad::Behaviour<kad::store::MemoryStore>,
+    pub(crate) behaviour: B,
+}
+
+pub(crate) struct SwarmManager<B>
+where
+    B: NetworkBehaviour + 'static,
+{
+    swarm: Swarm<SwarmBehaviour<B>>,
     event_pub: EventPublisher,
     bootnodes: HashMap<PeerId, Vec<Multiaddr>>,
     peer_tracker_info_watcher: watch::Receiver<PeerTrackerInfo>,
     kademlia_interval: Interval,
 }
 
-impl<B, S> SwarmManager<B, S>
+impl<B> SwarmManager<B>
 where
-    B: Blockstore,
-    S: Store,
+    B: NetworkBehaviour,
 {
     pub(crate) async fn new(
-        swarm: Swarm<Behaviour<B, S>>,
+        swarm: Swarm<SwarmBehaviour<B>>,
         event_pub: EventPublisher,
         peer_tracker: &PeerTracker,
         bootnodes: HashMap<PeerId, Vec<Multiaddr>>,
-    ) -> SwarmManager<B, S> {
+    ) -> SwarmManager<B> {
         let peer_tracker_info_watcher = peer_tracker.info_watcher();
         let kademlia_interval = Interval::new(Duration::from_secs(30)).await;
 
@@ -76,12 +88,12 @@ where
         manager
     }
 
-    pub(crate) fn behaviour(&self) -> &Behaviour<B, S> {
-        self.swarm.behaviour()
+    pub(crate) fn behaviour(&self) -> &B {
+        &self.swarm.behaviour().behaviour
     }
 
-    pub(crate) fn behaviour_mut(&mut self) -> &mut Behaviour<B, S> {
-        self.swarm.behaviour_mut()
+    pub(crate) fn behaviour_mut(&mut self) -> &mut B {
+        &mut self.swarm.behaviour_mut().behaviour
     }
 
     pub(crate) fn bootstrap(&mut self) {
@@ -131,10 +143,7 @@ where
             .collect()
     }
 
-    pub(crate) async fn poll(
-        &mut self,
-        peer_tracker: &mut PeerTracker,
-    ) -> Result<SwarmEvent<BehaviourEvent<B, S>>> {
+    pub(crate) async fn poll(&mut self, peer_tracker: &mut PeerTracker) -> Result<B::ToSwarm> {
         /*
                      *
 
@@ -165,7 +174,11 @@ where
                         self.bootstrap();
                     }
                 }
-                ev = self.swarm.select_next_some() => return Ok(ev),
+                ev = self.swarm.select_next_some() => {
+                    if let Some(ev) = self.on_swarm_event(peer_tracker, ev).await {
+                        return Ok(ev);
+                    }
+                }
             }
         }
     }
@@ -173,14 +186,15 @@ where
     async fn on_swarm_event(
         &mut self,
         peer_tracker: &mut PeerTracker,
-        ev: SwarmEvent<BehaviourEvent<B, S>>,
-    ) -> Option<SwarmEvent<BehaviourEvent<B, S>>> {
+        ev: SwarmEvent<SwarmBehaviourEvent<B>>,
+    ) -> Option<B::ToSwarm> {
         match ev {
             SwarmEvent::Behaviour(ev) => match ev {
-                BehaviourEvent::Identify(ev) => self.on_identify_event(ev),
-                BehaviourEvent::Kademlia(ev) => self.on_kademlia_event(peer_tracker, ev),
-                BehaviourEvent::Ping(ev) => self.on_ping_event(ev),
-                ev => return Some(SwarmEvent::Behaviour(ev)),
+                SwarmBehaviourEvent::Identify(ev) => self.on_identify_event(ev),
+                SwarmBehaviourEvent::Kademlia(ev) => self.on_kademlia_event(peer_tracker, ev),
+                SwarmBehaviourEvent::Ping(ev) => self.on_ping_event(ev),
+                SwarmBehaviourEvent::ConnectionControl(_) | SwarmBehaviourEvent::Autonat(_) => {}
+                SwarmBehaviourEvent::Behaviour(ev) => return Some(ev),
             },
             SwarmEvent::ConnectionEstablished {
                 peer_id,
@@ -197,7 +211,7 @@ where
             } => {
                 self.on_peer_disconnected(peer_tracker, peer_id, connection_id);
             }
-            ev => return Some(ev),
+            _ => {}
         }
 
         None
@@ -317,7 +331,6 @@ where
             .behaviour_mut()
             .connection_control
             .set_stopping(true);
-        self.swarm.behaviour_mut().header_ex.stop();
 
         // TODO
         /*
