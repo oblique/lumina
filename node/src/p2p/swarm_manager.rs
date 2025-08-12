@@ -483,11 +483,12 @@ pub(crate) fn dht_topic(topic: &str) -> RecordKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cid::Cid;
 
     #[test]
     fn dht_key() {
         let key = dht_topic("/full/v0.1.0");
-        let key_vec = topic_to_dht_key_vec("/full/v0.1.0");
+        let key_vec = dht_topic("/full/v0.1.0").to_vec();
         let expected = "bafkreidjoruznlfsmvecpvipnfpoe4jehgjjd753qob53bo77se6whba34"
             .parse::<Cid>()
             .unwrap();

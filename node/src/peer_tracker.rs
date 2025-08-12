@@ -33,24 +33,18 @@ pub struct PeerTrackerInfo {
 
 #[derive(Clone, Debug, Default)]
 struct Peer {
-    //state: PeerState,
     addrs: SmallVec<[Multiaddr; 4]>,
     connections: SmallVec<[ConnectionId; 1]>,
-    //node_kind: NodeKind,
     trusted: bool,
     archival: bool,
+    kind: Option<NodeKind>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PeerState {
-    Discovered,
-    AddressesFound,
-    Connected,
-}
-
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum NodeKind {
     Bridge,
     Full,
+    #[default]
     Light,
 }
 
@@ -286,7 +280,7 @@ mod tests {
     #[test]
     fn trust_before_connect() {
         let event_channel = EventChannel::new();
-        let tracker = PeerTracker::new(event_channel.publisher());
+        let mut tracker = PeerTracker::new(event_channel.publisher());
         let mut watcher = tracker.info_watcher();
         let peer = PeerId::random();
 
@@ -295,7 +289,8 @@ mod tests {
         tracker.set_trusted(peer, true);
         assert!(!watcher.has_changed().unwrap());
 
-        tracker.set_connected(peer, ConnectionId::new_unchecked(1), None);
+        tracker.add_connection(peer, ConnectionId::new_unchecked(1), None);
+        assert!(tracker.is_connected(peer));
         assert!(watcher.has_changed().unwrap());
         let info = watcher.borrow_and_update().to_owned();
         assert_eq!(info.num_connected_peers, 1);
@@ -305,13 +300,14 @@ mod tests {
     #[test]
     fn trust_after_connect() {
         let event_channel = EventChannel::new();
-        let tracker = PeerTracker::new(event_channel.publisher());
+        let mut tracker = PeerTracker::new(event_channel.publisher());
         let mut watcher = tracker.info_watcher();
         let peer = PeerId::random();
 
         assert!(!watcher.has_changed().unwrap());
 
-        tracker.set_connected(peer, ConnectionId::new_unchecked(1), None);
+        tracker.add_connection(peer, ConnectionId::new_unchecked(1), None);
+        assert!(tracker.is_connected(peer));
         assert!(watcher.has_changed().unwrap());
         let info = watcher.borrow_and_update().to_owned();
         assert_eq!(info.num_connected_peers, 1);
@@ -327,7 +323,7 @@ mod tests {
     #[test]
     fn untrust_after_connect() {
         let event_channel = EventChannel::new();
-        let tracker = PeerTracker::new(event_channel.publisher());
+        let mut tracker = PeerTracker::new(event_channel.publisher());
         let mut watcher = tracker.info_watcher();
         let peer = PeerId::random();
 
@@ -336,7 +332,8 @@ mod tests {
         tracker.set_trusted(peer, true);
         assert!(!watcher.has_changed().unwrap());
 
-        tracker.set_connected(peer, ConnectionId::new_unchecked(1), None);
+        tracker.add_connection(peer, ConnectionId::new_unchecked(1), None);
+        assert!(tracker.is_connected(peer));
         assert!(watcher.has_changed().unwrap());
         let info = watcher.borrow_and_update().to_owned();
         assert_eq!(info.num_connected_peers, 1);
