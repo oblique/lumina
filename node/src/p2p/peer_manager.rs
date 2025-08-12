@@ -63,11 +63,20 @@ where
     B: NetworkBehaviour + 'static,
 {
     swarm: Swarm<SwarmBehaviour<B>>,
+    peer_tracker: PeerTracker,
+    peer_tracker_info_watcher: watch::Receiver<PeerTrackerInfo>,
     event_pub: EventPublisher,
     bootnodes: HashMap<PeerId, Vec<Multiaddr>>,
     listeners: SmallVec<[ListenerId; 1]>,
-    peer_tracker_info_watcher: watch::Receiver<PeerTrackerInfo>,
     kademlia_interval: Interval,
+}
+
+pub(crate) struct SwarmContext<'a, B>
+where
+    B: NetworkBehaviour,
+{
+    pub(crate) behaviour: &'a mut B,
+    pub(crate) peer_tracker: &'a PeerTracker,
 }
 
 impl<B> SwarmManager<B>
@@ -79,7 +88,7 @@ where
         keypair: &Keypair,
         bootnodes: &[Multiaddr],
         listen_on: &[Multiaddr],
-        peer_tracker: &mut PeerTracker,
+        mut peer_tracker: PeerTracker,
         event_pub: EventPublisher,
         behaviour: B,
     ) -> Result<SwarmManager<B>> {
@@ -138,10 +147,11 @@ where
 
         let mut manager = SwarmManager {
             swarm,
+            peer_tracker,
+            peer_tracker_info_watcher,
             event_pub,
             bootnodes: bootnodes_map,
             listeners,
-            peer_tracker_info_watcher,
             kademlia_interval,
         };
 
@@ -150,12 +160,11 @@ where
         Ok(manager)
     }
 
-    pub(crate) fn behaviour(&self) -> &B {
-        &self.swarm.behaviour().behaviour
-    }
-
-    pub(crate) fn behaviour_mut(&mut self) -> &mut B {
-        &mut self.swarm.behaviour_mut().behaviour
+    pub(crate) fn context<'a>(&'a mut self) -> SwarmContext<'a, B> {
+        SwarmContext {
+            behaviour: &mut self.swarm.behaviour_mut().behaviour,
+            peer_tracker: &self.peer_tracker,
+        }
     }
 
     fn bootstrap(&mut self) {
@@ -205,7 +214,13 @@ where
             .collect()
     }
 
-    pub(crate) async fn poll(&mut self, peer_tracker: &mut PeerTracker) -> Result<B::ToSwarm> {
+    pub(crate) fn set_peer_trust(&mut self, peer_id: PeerId, is_trusted: bool) {
+        if *self.swarm.local_peer_id() != peer_id {
+            self.peer_tracker.set_trusted(peer_id, is_trusted);
+        }
+    }
+
+    pub(crate) async fn poll(&mut self) -> Result<B::ToSwarm> {
         /*
                      *
 
@@ -224,6 +239,9 @@ where
 
         loop {
             select! {
+                // We use info watcher here in order to act only once when the connected
+                // peers are zero.
+                // TODO
                 _ = self.peer_tracker_info_watcher.changed() => {
                     if self.peer_tracker_info_watcher.borrow().num_connected_peers == 0 {
                         warn!("All peers disconnected");
@@ -231,13 +249,13 @@ where
                     }
                 }
                 _ = self.kademlia_interval.tick() => {
-                    if peer_tracker.info().num_connected_peers < MIN_CONNECTED_PEERS
+                    if self.peer_tracker.info().num_connected_peers < MIN_CONNECTED_PEERS
                     {
                         self.bootstrap();
                     }
                 }
                 ev = self.swarm.select_next_some() => {
-                    if let Some(ev) = self.on_swarm_event(peer_tracker, ev).await {
+                    if let Some(ev) = self.on_swarm_event(ev).await {
                         return Ok(ev);
                     }
                 }
@@ -247,13 +265,12 @@ where
 
     async fn on_swarm_event(
         &mut self,
-        peer_tracker: &mut PeerTracker,
         ev: SwarmEvent<SwarmBehaviourEvent<B>>,
     ) -> Option<B::ToSwarm> {
         match ev {
             SwarmEvent::Behaviour(ev) => match ev {
                 SwarmBehaviourEvent::Identify(ev) => self.on_identify_event(ev),
-                SwarmBehaviourEvent::Kademlia(ev) => self.on_kademlia_event(peer_tracker, ev),
+                SwarmBehaviourEvent::Kademlia(ev) => self.on_kademlia_event(ev),
                 SwarmBehaviourEvent::Ping(ev) => self.on_ping_event(ev),
                 SwarmBehaviourEvent::ConnectionControl(_) | SwarmBehaviourEvent::Autonat(_) => {}
                 SwarmBehaviourEvent::Behaviour(ev) => return Some(ev),
@@ -264,14 +281,14 @@ where
                 endpoint,
                 ..
             } => {
-                self.on_peer_connected(peer_tracker, peer_id, connection_id, endpoint);
+                self.on_peer_connected(peer_id, connection_id, endpoint);
             }
             SwarmEvent::ConnectionClosed {
                 peer_id,
                 connection_id,
                 ..
             } => {
-                self.on_peer_disconnected(peer_tracker, peer_id, connection_id);
+                self.on_peer_disconnected(peer_id, connection_id);
             }
             _ => {}
         }
@@ -280,12 +297,8 @@ where
     }
 
     #[instrument(skip_all, fields(peer_id = %peer_id))]
-    pub(crate) fn peer_maybe_discovered(
-        &mut self,
-        peer_tracker: &mut PeerTracker,
-        peer_id: PeerId,
-    ) {
-        if !peer_tracker.set_maybe_discovered(peer_id) {
+    pub(crate) fn peer_maybe_discovered(&mut self, peer_id: PeerId) {
+        if !self.peer_tracker.set_maybe_discovered(peer_id) {
             return;
         }
 
@@ -295,7 +308,6 @@ where
     #[instrument(skip_all, fields(peer_id = %peer_id))]
     fn on_peer_connected(
         &mut self,
-        peer_tracker: &mut PeerTracker,
         peer_id: PeerId,
         connection_id: ConnectionId,
         endpoint: ConnectedPoint,
@@ -316,17 +328,16 @@ where
             _ => None,
         };
 
-        peer_tracker.set_connected(peer_id, connection_id, dialed_addr);
+        self.peer_tracker
+            .set_connected(peer_id, connection_id, dialed_addr);
     }
 
     #[instrument(skip_all, fields(peer_id = %peer_id))]
-    fn on_peer_disconnected(
-        &mut self,
-        peer_tracker: &mut PeerTracker,
-        peer_id: PeerId,
-        connection_id: ConnectionId,
-    ) {
-        if peer_tracker.set_maybe_disconnected(peer_id, connection_id) {
+    fn on_peer_disconnected(&mut self, peer_id: PeerId, connection_id: ConnectionId) {
+        if self
+            .peer_tracker
+            .set_maybe_disconnected(peer_id, connection_id)
+        {
             debug!("Peer disconnected");
         }
     }
@@ -349,12 +360,12 @@ where
     }
 
     #[instrument(level = "trace", skip(self))]
-    fn on_kademlia_event(&mut self, peer_tracker: &mut PeerTracker, ev: kad::Event) {
+    fn on_kademlia_event(&mut self, ev: kad::Event) {
         match ev {
             kad::Event::RoutingUpdated {
                 peer, addresses, ..
             } => {
-                peer_tracker.add_addresses(peer, addresses.iter());
+                self.peer_tracker.add_addresses(peer, addresses.iter());
             }
             kad::Event::OutboundQueryProgressed { result, .. } => {
                 if let kad::QueryResult::GetProviders(Ok(providers)) = result {
@@ -386,7 +397,7 @@ where
         }
     }
 
-    pub(crate) async fn stop(&mut self, peer_tracker: &mut PeerTracker) {
+    pub(crate) async fn stop(&mut self) {
         self.swarm
             .behaviour_mut()
             .connection_control
@@ -396,7 +407,7 @@ where
             self.swarm.remove_listener(listener);
         }
 
-        for (_, ids) in peer_tracker.connections() {
+        for (_, ids) in self.peer_tracker.connections() {
             for id in ids {
                 self.swarm.close_connection(id);
             }
@@ -422,7 +433,7 @@ where
                     ..
                 } => {
                     // This will generate the PeerDisconnected events.
-                    self.on_peer_disconnected(peer_tracker, peer_id, connection_id);
+                    self.on_peer_disconnected(peer_id, connection_id);
                 }
                 _ => {}
             }

@@ -717,7 +717,6 @@ where
     header_sub_topic_hash: TopicHash,
     bad_encoding_fraud_sub_topic: TopicHash,
     cmd_rx: mpsc::Receiver<P2pCmd>,
-    peer_tracker: PeerTracker,
     header_sub_state: Option<HeaderSubState>,
     bitswap_queries: HashMap<beetswap::QueryId, OneshotResultSender<Vec<u8>, P2pError>>,
     network_compromised_token: Token,
@@ -739,7 +738,7 @@ where
         args: P2pArgs<B, S>,
         cancellation_token: CancellationToken,
         cmd_rx: mpsc::Receiver<P2pCmd>,
-        mut peer_tracker: PeerTracker,
+        peer_tracker: PeerTracker,
     ) -> Result<Self, P2pError> {
         let header_sub_topic = gossipsub_ident_topic(&args.network_id, "/header-sub/v0.0.1");
         let bad_encoding_fraud_sub_topic =
@@ -768,7 +767,7 @@ where
             &args.local_keypair,
             &args.bootnodes,
             &args.listen_on,
-            &mut peer_tracker,
+            peer_tracker,
             args.event_pub.clone(),
             behaviour,
         )
@@ -778,7 +777,6 @@ where
             cancellation_token,
             swarm,
             cmd_rx,
-            peer_tracker,
             bad_encoding_fraud_sub_topic: bad_encoding_fraud_sub_topic.hash(),
             header_sub_topic_hash: header_sub_topic.hash(),
             header_sub_state: None,
@@ -801,7 +799,7 @@ where
                 _ = poll_closed(&mut self.bitswap_queries) => {
                     self.prune_canceled_bitswap_queries();
                 }
-                res = self.swarm.poll(&mut self.peer_tracker) => {
+                res = self.swarm.poll() => {
                     match res {
                         Ok(ev) => {
                             if let Err(e) = self.on_behaviour_event(ev).await {
@@ -819,8 +817,8 @@ where
             }
         }
 
-        self.swarm.behaviour_mut().header_ex.stop();
-        self.swarm.stop(&mut self.peer_tracker).await;
+        self.swarm.context().behaviour.header_ex.stop();
+        self.swarm.stop().await;
     }
 
     fn prune_canceled_bitswap_queries(&mut self) {
@@ -834,7 +832,7 @@ where
 
         for query_id in cancelled {
             self.bitswap_queries.remove(&query_id);
-            self.swarm.behaviour_mut().bitswap.cancel(query_id);
+            self.swarm.context().behaviour.bitswap.cancel(query_id);
         }
     }
 
@@ -857,17 +855,16 @@ where
                 request,
                 respond_to,
             } => {
-                self.swarm.behaviour_mut().header_ex.send_request(
-                    request,
-                    respond_to,
-                    &self.peer_tracker,
-                );
+                let ctx = self.swarm.context();
+                ctx.behaviour
+                    .header_ex
+                    .send_request(request, respond_to, &ctx.peer_tracker);
             }
             P2pCmd::Listeners { respond_to } => {
                 respond_to.maybe_send(self.swarm.listeners());
             }
             P2pCmd::ConnectedPeers { respond_to } => {
-                let peers = self.peer_tracker.connected_peers();
+                let peers = self.swarm.context().peer_tracker.connected_peers();
                 respond_to.maybe_send(peers);
             }
             P2pCmd::InitHeaderSub { head, channel } => {
@@ -877,9 +874,7 @@ where
                 peer_id,
                 is_trusted,
             } => {
-                if self.swarm.local_peer_id() != peer_id {
-                    self.peer_tracker.set_trusted(peer_id, is_trusted);
-                }
+                self.swarm.set_peer_trust(peer_id, is_trusted);
             }
             P2pCmd::GetShwapCid { cid, respond_to } => {
                 self.on_get_shwap_cid(cid, respond_to);
@@ -901,7 +896,7 @@ where
 
     #[instrument(skip_all)]
     fn report(&mut self) {
-        let tracker_info = self.peer_tracker.info();
+        let tracker_info = self.swarm.context().peer_tracker.info();
 
         info!(
             "peers: {}, trusted peers: {}",
@@ -934,14 +929,13 @@ where
 
                 if !matches!(acceptance, gossipsub::MessageAcceptance::Reject) {
                     // We may have discovered a new peer
-                    // TODO
-                    self.swarm
-                        .peer_maybe_discovered(&mut self.peer_tracker, peer);
+                    self.swarm.peer_maybe_discovered(peer);
                 }
 
                 let _ = self
                     .swarm
-                    .behaviour_mut()
+                    .context()
+                    .behaviour
                     .gossipsub
                     .report_message_validation_result(&message_id, &peer, acceptance);
             }
@@ -952,7 +946,7 @@ where
     #[instrument(level = "trace", skip_all)]
     fn on_get_shwap_cid(&mut self, cid: Cid, respond_to: OneshotResultSender<Vec<u8>, P2pError>) {
         trace!("Requesting CID {cid} from bitswap");
-        let query_id = self.swarm.behaviour_mut().bitswap.get(&cid);
+        let query_id = self.swarm.context().behaviour.bitswap.get(&cid);
         self.bitswap_queries.insert(query_id, respond_to);
     }
 
@@ -1020,7 +1014,11 @@ where
         let Ok(befp) = BadEncodingFraudProof::decode(data) else {
             trace!("Malformed bad encoding fraud proof from {peer}");
             // TODO
-            self.swarm.behaviour_mut().gossipsub.blacklist_peer(peer);
+            self.swarm
+                .context()
+                .behaviour
+                .gossipsub
+                .blacklist_peer(peer);
             return gossipsub::MessageAcceptance::Reject;
         };
 
@@ -1050,7 +1048,11 @@ where
 
         if let Err(e) = befp.validate(&header) {
             trace!("Received invalid bad encoding fraud proof from {peer}: {e}");
-            self.swarm.behaviour_mut().gossipsub.blacklist_peer(peer);
+            self.swarm
+                .context()
+                .behaviour
+                .gossipsub
+                .blacklist_peer(peer);
             return gossipsub::MessageAcceptance::Reject;
         }
 
