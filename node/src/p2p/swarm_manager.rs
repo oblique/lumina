@@ -225,6 +225,13 @@ where
     }
 
     pub(crate) async fn poll(&mut self) -> Result<B::ToSwarm> {
+        // TODO:
+        //
+        // - Call get_closest_peers for FULL_NODE_TOPIC and ARCHIVAL_NODE_TOPIC.
+        // - Mark anything that is returned with ARCHIVAL_NODE_TOPIC as archival.
+        // - Garbage collect peers from peer_tracker if they are disconnected for some time.
+        //
+        //
         /*
                      *
 
@@ -245,7 +252,7 @@ where
             select! {
                 // We use info watcher here in order to act only once when the connected
                 // peers are zero.
-                // TODO
+                // TODO: find a way to remove it
                 _ = self.peer_tracker_info_watcher.changed() => {
                     if self.peer_tracker_info_watcher.borrow().num_connected_peers == 0 {
                         warn!("All peers disconnected");
