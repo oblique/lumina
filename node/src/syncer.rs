@@ -481,6 +481,8 @@ where
             self.batch_size,
         );
 
+        println!("NEXT {next_batch:?}");
+
         if next_batch.is_empty() {
             // no headers to fetch
             return Ok(());
@@ -625,6 +627,10 @@ fn calculate_range_to_fetch(
     synced_headers: &[BlockRange],
     limit: u64,
 ) -> BlockRange {
+    dbg!(subjective_head_height);
+    dbg!(synced_headers);
+    dbg!(limit);
+
     let mut synced_headers_iter = synced_headers.iter().rev();
 
     let Some(synced_head_range) = synced_headers_iter.next() else {
@@ -643,7 +649,7 @@ fn calculate_range_to_fetch(
     let penultimate_range_end = synced_headers_iter.next().map(|r| *r.end()).unwrap_or(0);
 
     let range = penultimate_range_end + 1..=synced_head_range.start().saturating_sub(1);
-    range.headn(limit)
+    dbg!(range.headn(limit))
 }
 
 #[instrument(skip_all)]

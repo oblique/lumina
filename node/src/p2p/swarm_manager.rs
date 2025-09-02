@@ -1,11 +1,13 @@
 use std::collections::{HashMap, HashSet};
+use std::fmt::Debug;
 use std::sync::LazyLock;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
 use blockstore::Blockstore;
 use futures::StreamExt;
-use libp2p::swarm::NetworkInfo;
+use libp2p::kad::QueryId;
+use libp2p::swarm::{dial_opts, NetworkInfo};
 use libp2p::{
     autonat,
     connection_limits::ConnectionLimits,
@@ -46,6 +48,43 @@ use crate::utils::{celestia_protocol_id, MultiaddrExt};
 // more aggresively.
 const MIN_CONNECTED_PEERS: u64 = 4;
 
+/*
+
+
+// DefaultParameters returns the default Parameters' configuration values
+// for the Discovery module
+func DefaultParameters() *Parameters {
+    return &Parameters{
+        PeersLimit:        5,
+        AdvertiseInterval: time.Hour,
+    }
+}
+
+
+// DefaultParameters returns the default configuration values for the peer manager parameters
+func DefaultParameters() *Parameters {
+    return &Parameters{
+        // PoolValidationTimeout's default value is based on the default daser sampling timeout of 1 minute.
+        // If a received datahash has not tried to be sampled within these two minutes, the pool will be
+        // removed.
+        PoolValidationTimeout: 2 * time.Minute,
+        // PeerCooldown's default value is based on initial network tests that showed a ~3.5 second
+        // sync time for large blocks. This value gives our (discovery) peers enough time to sync
+        // the new block before we ask them again.
+        PeerCooldown: 3 * time.Second,
+        GcInterval:   time.Second * 30,
+        // blacklisting is off by default //TODO(@walldiss): enable blacklisting once all related issues
+        // are resolved
+        EnableBlackListing: false,
+    }
+}
+
+
+ */
+
+const MIN_CONNECTED_FULL_PEERS: u64 = 5;
+const MIN_CONNECTED_ARCHIVAL_PEERS: u64 = 1;
+
 static FULL_NODE_TOPIC: LazyLock<RecordKey> = LazyLock::new(|| dht_topic("/full/v0.1.0"));
 static ARCHIVAL_NODE_TOPIC: LazyLock<RecordKey> = LazyLock::new(|| dht_topic("/archival/v0.1.0"));
 
@@ -53,6 +92,7 @@ static ARCHIVAL_NODE_TOPIC: LazyLock<RecordKey> = LazyLock::new(|| dht_topic("/a
 struct SwarmBehaviour<B>
 where
     B: NetworkBehaviour + 'static,
+    B::ToSwarm: Debug,
 {
     connection_control: connection_control::Behaviour,
     autonat: autonat::Behaviour,
@@ -65,6 +105,7 @@ where
 pub(crate) struct SwarmManager<B>
 where
     B: NetworkBehaviour + 'static,
+    B::ToSwarm: Debug,
 {
     swarm: Swarm<SwarmBehaviour<B>>,
     peer_tracker: PeerTracker,
@@ -73,6 +114,8 @@ where
     bootnodes: HashMap<PeerId, Vec<Multiaddr>>,
     listeners: SmallVec<[ListenerId; 1]>,
     kademlia_interval: Interval,
+    ongoing_full_node_kad_query: Option<QueryId>,
+    ongoing_archival_node_kad_query: Option<QueryId>,
 }
 
 pub(crate) struct SwarmContext<'a, B>
@@ -86,6 +129,7 @@ where
 impl<B> SwarmManager<B>
 where
     B: NetworkBehaviour,
+    B::ToSwarm: Debug,
 {
     pub(crate) async fn new(
         network_id: &str,
@@ -157,9 +201,13 @@ where
             bootnodes: bootnodes_map,
             listeners,
             kademlia_interval,
+            ongoing_full_node_kad_query: None,
+            ongoing_archival_node_kad_query: None,
         };
 
         manager.bootstrap();
+        manager.start_full_node_kad_query();
+        manager.start_archival_node_kad_query();
 
         Ok(manager)
     }
@@ -171,27 +219,71 @@ where
         }
     }
 
+    fn connect(&mut self, peer_id: PeerId, addresses: Vec<Multiaddr>) {
+        let dial_opts = DialOpts::peer_id(peer_id)
+            // Tell Swarm not to dial if peer is already connected or there
+            // is an ongoing dialing.
+            .condition(PeerCondition::DisconnectedAndNotDialing);
+
+        let dial_opts = if addresses.is_empty() {
+            dial_opts.build()
+        } else {
+            dial_opts.addresses(addresses.clone()).build()
+        };
+
+        if let Err(e) = self.swarm.dial(dial_opts) {
+            if !matches!(e, DialError::DialPeerConditionFalse(_)) {
+                warn!("Failed to dial on {addresses:?}: {e}");
+            }
+        }
+    }
+
     fn bootstrap(&mut self) {
         self.event_pub.send(NodeEvent::ConnectingToBootnodes);
 
-        for (peer_id, addrs) in &self.bootnodes {
-            let dial_opts = DialOpts::peer_id(*peer_id)
-                .addresses(addrs.clone())
-                // Tell Swarm not to dial if peer is already connected or there
-                // is an ongoing dialing.
-                .condition(PeerCondition::DisconnectedAndNotDialing)
-                .build();
-
-            if let Err(e) = self.swarm.dial(dial_opts) {
-                if !matches!(e, DialError::DialPeerConditionFalse(_)) {
-                    warn!("Failed to dial on {addrs:?}: {e}");
-                }
-            }
+        for (peer_id, addrs) in self.bootnodes.clone() {
+            self.connect(peer_id, addrs);
         }
 
         // trigger kademlia bootstrap
         if self.swarm.behaviour_mut().kademlia.bootstrap().is_err() {
             warn!("Can't run kademlia bootstrap, no known peers");
+        }
+    }
+
+    fn start_full_node_kad_query(&mut self) {
+        if self.ongoing_full_node_kad_query.is_none() {
+            self.swarm
+                .behaviour_mut()
+                .kademlia
+                .get_closest_peers(FULL_NODE_TOPIC.to_vec());
+
+            let id = self
+                .swarm
+                .behaviour_mut()
+                .kademlia
+                .get_providers(FULL_NODE_TOPIC.clone());
+            println!("XXX(full): {id:?}");
+
+            self.ongoing_full_node_kad_query = Some(id);
+        }
+    }
+
+    fn start_archival_node_kad_query(&mut self) {
+        if self.ongoing_archival_node_kad_query.is_none() {
+            self.swarm
+                .behaviour_mut()
+                .kademlia
+                .get_closest_peers(ARCHIVAL_NODE_TOPIC.to_vec());
+
+            let id = self
+                .swarm
+                .behaviour_mut()
+                .kademlia
+                .get_providers(ARCHIVAL_NODE_TOPIC.clone());
+            println!("XXX(archival): {id:?}");
+
+            self.ongoing_archival_node_kad_query = Some(id);
         }
     }
 
@@ -258,11 +350,23 @@ where
                         warn!("All peers disconnected");
                         self.bootstrap();
                     }
+
+                    dbg!(self.peer_tracker_info_watcher.borrow());
+
                 }
                 _ = self.kademlia_interval.tick() => {
                     if self.peer_tracker.info().num_connected_peers < MIN_CONNECTED_PEERS
                     {
                         self.bootstrap();
+                    }
+
+
+                    if self.peer_tracker.info().num_connected_full_nodes < MIN_CONNECTED_FULL_PEERS {
+                        self.start_full_node_kad_query();
+                    }
+
+                    if self.peer_tracker.info().num_connected_archival_nodes < MIN_CONNECTED_ARCHIVAL_PEERS {
+                        self.start_archival_node_kad_query();
                     }
                 }
                 ev = self.swarm.select_next_some() => {
@@ -278,6 +382,7 @@ where
         &mut self,
         ev: SwarmEvent<SwarmBehaviourEvent<B>>,
     ) -> Option<B::ToSwarm> {
+        //dbg!(&ev);
         match ev {
             SwarmEvent::Behaviour(ev) => match ev {
                 SwarmBehaviourEvent::Identify(ev) => self.on_identify_event(ev),
@@ -380,10 +485,65 @@ where
             } => {
                 self.peer_tracker.add_addresses(peer, addresses.iter());
             }
-            kad::Event::OutboundQueryProgressed { result, .. } => {
+            kad::Event::OutboundQueryProgressed {
+                id: query_id,
+                result,
+                step,
+                ..
+            } => {
+                let is_full = self
+                    .ongoing_full_node_kad_query
+                    .is_some_and(|id| id == query_id);
+                let is_archival = self
+                    .ongoing_archival_node_kad_query
+                    .is_some_and(|id| id == query_id);
+
+                assert!(!(is_full && is_archival));
+
+                if step.last {
+                    if is_full {
+                        self.ongoing_full_node_kad_query.take();
+                    } else if is_archival {
+                        self.ongoing_archival_node_kad_query.take();
+                    }
+                }
+
                 if let kad::QueryResult::GetProviders(Ok(providers)) = result {
                     if let kad::GetProvidersOk::FoundProviders { providers, .. } = providers {
                         for p in providers {
+                            if is_full {
+                                //self.peer_tracker.mark_as_full(p);
+                                /*
+                                if self.peer_tracker.info().num_connected_full_nodes
+                                    < MIN_CONNECTED_FULL_PEERS
+                                {
+                                    let addrs = self
+                                        .peer_tracker
+                                        .addresses(p)
+                                        .unwrap_or_default()
+                                        .to_owned();
+                                    self.connect(p, addrs);
+                                }
+                                */
+                            }
+
+                            if is_archival {
+                                self.peer_tracker.mark_as_archival(p);
+
+                                /*
+                                if self.peer_tracker.info().num_connected_archival_nodes
+                                    < MIN_CONNECTED_ARCHIVAL_PEERS
+                                {
+                                    let addrs = self
+                                        .peer_tracker
+                                        .addresses(p)
+                                        .unwrap_or_default()
+                                        .to_owned();
+                                    self.connect(p, addrs);
+                                }
+                                */
+                            }
+
                             // TODO
                         }
                     }
@@ -420,7 +580,7 @@ where
             self.swarm.remove_listener(listener);
         }
 
-        for (connection_id, _) in self.peer_tracker.connections() {
+        for (connection_id, _) in self.peer_tracker.all_connections() {
             self.swarm.close_connection(connection_id);
         }
 

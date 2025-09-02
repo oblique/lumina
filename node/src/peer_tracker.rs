@@ -1,8 +1,8 @@
 //! Primitives related to tracking the state of peers in the network.
 
-use std::borrow::Borrow;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::{borrow::Borrow, mem};
 
 use libp2p::{swarm::ConnectionId, Multiaddr, PeerId};
 use rand::seq::SliceRandom;
@@ -23,12 +23,14 @@ pub(crate) struct PeerTracker {
 
 /// Statistics of the connected peers
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct PeerTrackerInfo {
     /// Number of the connected peers.
     pub num_connected_peers: u64,
     /// Number of the connected trusted peers.
     pub num_connected_trusted_peers: u64,
+    pub num_connected_full_nodes: u64,
+    pub num_connected_archival_nodes: u64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -37,7 +39,7 @@ struct Peer {
     connections: SmallVec<[ConnectionId; 1]>,
     trusted: bool,
     archival: bool,
-    kind: NodeKind,
+    node_kind: NodeKind,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -63,6 +65,10 @@ impl NodeKind {
             },
             _ => NodeKind::Unknown,
         }
+    }
+
+    pub(crate) fn has_full_capabilities(&self) -> bool {
+        matches!(self, NodeKind::Full | NodeKind::Bridge)
     }
 }
 
@@ -186,9 +192,11 @@ impl PeerTracker {
         peer.connections.retain(|id| *id != connection_id);
         self.connection_to_peer.remove(&connection_id);
 
-        // If this is the last connection from the peer
-        if peer.is_connected() {
-            decrement_connected_peers(&self.info_tx, peer.trusted);
+        // If this is the last connection from the peer.
+        if !peer.is_connected() {
+            decrement_connected_peers(&self.info_tx, peer);
+            peer.node_kind = NodeKind::Unknown;
+            peer.archival = false;
 
             self.event_pub.send(NodeEvent::PeerDisconnected {
                 id: peer_id.to_owned(),
@@ -199,7 +207,40 @@ impl PeerTracker {
 
     pub(crate) fn on_agent_version(&mut self, peer_id: PeerId, agent_version: &str) {
         let peer = self.peers.entry(peer_id.to_owned()).or_default();
-        peer.kind = NodeKind::from_agent_version(agent_version);
+        let new_node_kind = NodeKind::from_agent_version(agent_version);
+        println!("{peer_id:?}: AGENT: {agent_version}, KIND: {new_node_kind:?}");
+
+        let was_full = peer.node_kind.has_full_capabilities();
+        let is_full = new_node_kind.has_full_capabilities();
+        peer.node_kind = new_node_kind;
+
+        self.info_tx
+            .send_if_modified(|tracker_info| match (was_full, is_full) {
+                (true, false) => {
+                    tracker_info.num_connected_full_nodes -= 1;
+                    true
+                }
+                (false, true) => {
+                    tracker_info.num_connected_full_nodes += 1;
+                    true
+                }
+                _ => false,
+            });
+    }
+
+    /*
+     */
+
+    pub(crate) fn mark_as_archival(&mut self, peer_id: PeerId) {
+        let peer = self.peers.entry(peer_id.to_owned()).or_default();
+
+        if !peer.archival {
+            peer.archival = true;
+
+            self.info_tx.send_modify(|tracker_info| {
+                tracker_info.num_connected_archival_nodes += 1;
+            });
+        }
     }
 
     /// Returns true if peer is connected.
@@ -210,6 +251,15 @@ impl PeerTracker {
             .map(|peer| peer.is_connected())
             .unwrap_or(false)
     }
+
+    /*
+    pub(crate) fn is_archival(&self, peer_id: PeerId) -> bool {
+        self.peers
+            .get(&peer_id)
+            .map(|peer| peer.archival)
+            .unwrap_or(false)
+    }
+    */
 
     /// Returns the addresses of the peer.
     #[allow(dead_code)]
@@ -239,7 +289,7 @@ impl PeerTracker {
     }
 
     /// Returns all connections.
-    pub(crate) fn connections(&self) -> impl Iterator<Item = (ConnectionId, PeerId)> + '_ {
+    pub(crate) fn all_connections(&self) -> impl Iterator<Item = (ConnectionId, PeerId)> + '_ {
         self.connection_to_peer
             .iter()
             .map(|(&connection_id, &peer_id)| (connection_id, peer_id))
@@ -285,12 +335,20 @@ fn increment_connected_peers(info_tx: &watch::Sender<PeerTrackerInfo>, trusted: 
     });
 }
 
-fn decrement_connected_peers(info_tx: &watch::Sender<PeerTrackerInfo>, trusted: bool) {
+fn decrement_connected_peers(info_tx: &watch::Sender<PeerTrackerInfo>, peer: &Peer) {
     info_tx.send_modify(|tracker_info| {
         tracker_info.num_connected_peers -= 1;
 
-        if trusted {
+        if peer.trusted {
             tracker_info.num_connected_trusted_peers -= 1;
+        }
+
+        if peer.archival {
+            tracker_info.num_connected_archival_nodes -= 1;
+        }
+
+        if peer.node_kind.has_full_capabilities() {
+            tracker_info.num_connected_full_nodes -= 1;
         }
     });
 }
@@ -368,6 +426,89 @@ mod tests {
         let info = watcher.borrow_and_update().to_owned();
         assert_eq!(info.num_connected_peers, 1);
         assert_eq!(info.num_connected_trusted_peers, 0);
+    }
+
+    #[test]
+    fn tracker_info() {
+        let event_channel = EventChannel::new();
+        let mut tracker = PeerTracker::new(event_channel.publisher());
+        let mut watcher = tracker.info_watcher();
+        let peer = PeerId::random();
+
+        tracker.add_connection(peer, ConnectionId::new_unchecked(1), None);
+        assert!(tracker.is_connected(peer));
+        assert!(watcher.has_changed().unwrap());
+        let info = watcher.borrow_and_update().to_owned();
+        assert_eq!(
+            info,
+            PeerTrackerInfo {
+                num_connected_peers: 1,
+                num_connected_trusted_peers: 0,
+                num_connected_full_nodes: 0,
+                num_connected_archival_nodes: 0,
+            }
+        );
+
+        tracker.mark_as_archival(peer);
+        assert!(watcher.has_changed().unwrap());
+        let info = watcher.borrow_and_update().to_owned();
+        assert_eq!(
+            info,
+            PeerTrackerInfo {
+                num_connected_peers: 1,
+                num_connected_trusted_peers: 0,
+                num_connected_full_nodes: 0,
+                num_connected_archival_nodes: 1,
+            }
+        );
+
+        tracker.mark_as_archival(peer);
+        assert!(!watcher.has_changed().unwrap());
+
+        tracker.on_agent_version(peer, "celestia-node/celestia/full/v0.24.1/fb95d45");
+        assert!(watcher.has_changed().unwrap());
+        let info = watcher.borrow_and_update().to_owned();
+        assert_eq!(
+            info,
+            PeerTrackerInfo {
+                num_connected_peers: 1,
+                num_connected_trusted_peers: 0,
+                num_connected_full_nodes: 1,
+                num_connected_archival_nodes: 1,
+            }
+        );
+
+        tracker.on_agent_version(peer, "celestia-node/celestia/full/v0.24.1/fb95d45");
+        assert!(!watcher.has_changed().unwrap());
+
+        // Peer gets disconnected
+        tracker.remove_connection(peer, ConnectionId::new_unchecked(1));
+        assert!(watcher.has_changed().unwrap());
+        let info = watcher.borrow_and_update().to_owned();
+        assert_eq!(
+            info,
+            PeerTrackerInfo {
+                num_connected_peers: 0,
+                num_connected_trusted_peers: 0,
+                num_connected_full_nodes: 0,
+                num_connected_archival_nodes: 0,
+            }
+        );
+
+        // Peer gets reconnected
+        tracker.add_connection(peer, ConnectionId::new_unchecked(2), None);
+        assert!(tracker.is_connected(peer));
+        assert!(watcher.has_changed().unwrap());
+        let info = watcher.borrow_and_update().to_owned();
+        assert_eq!(
+            info,
+            PeerTrackerInfo {
+                num_connected_peers: 1,
+                num_connected_trusted_peers: 0,
+                num_connected_full_nodes: 0,
+                num_connected_archival_nodes: 0,
+            }
+        );
     }
 
     #[test]
