@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::{borrow::Borrow, mem};
 
 use libp2p::{swarm::ConnectionId, Multiaddr, PeerId};
+use lumina_utils::time::SystemTime;
 use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
@@ -34,12 +35,13 @@ pub struct PeerTrackerInfo {
 }
 
 #[derive(Clone, Debug, Default)]
-struct Peer {
-    addrs: SmallVec<[Multiaddr; 4]>,
+pub(crate) struct Peer {
+    addresses: SmallVec<[Multiaddr; 4]>,
     connections: SmallVec<[ConnectionId; 1]>,
     trusted: bool,
     archival: bool,
     node_kind: NodeKind,
+    disconnected_at: Option<SystemTime>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -67,19 +69,35 @@ impl NodeKind {
         }
     }
 
-    pub(crate) fn has_full_capabilities(&self) -> bool {
+    pub(crate) fn is_full(&self) -> bool {
         matches!(self, NodeKind::Full | NodeKind::Bridge)
     }
 }
 
 impl Peer {
-    fn is_connected(&self) -> bool {
+    pub(crate) fn addresses(&self) -> &[Multiaddr] {
+        &self.addresses
+    }
+
+    pub(crate) fn is_connected(&self) -> bool {
         !self.connections.is_empty()
     }
 
+    pub(crate) fn is_trusted(&self) -> bool {
+        self.trusted
+    }
+
+    pub(crate) fn is_archival(&self) -> bool {
+        self.archival
+    }
+
+    pub(crate) fn node_kind(&self) -> NodeKind {
+        self.node_kind
+    }
+
     fn add_address(&mut self, addr: Multiaddr) {
-        if !self.addrs.contains(&addr) {
-            self.addrs.push(addr);
+        if !self.addresses.contains(&addr) {
+            self.addresses.push(addr);
         }
     }
 }
@@ -103,6 +121,10 @@ impl PeerTracker {
     /// Returns a watcher for any [`PeerTrackerInfo`] changes.
     pub(crate) fn info_watcher(&self) -> watch::Receiver<PeerTrackerInfo> {
         self.info_tx.subscribe()
+    }
+
+    pub(crate) fn peer(&self, peer_id: PeerId) -> Option<&Peer> {
+        self.peers.get(&peer_id)
     }
 
     /// Adds a peer ID.
@@ -175,6 +197,7 @@ impl PeerTracker {
         // If peer was not already connected from before
         if !prev_connected {
             increment_connected_peers(&self.info_tx, peer.trusted);
+            peer.disconnected_at.take();
 
             self.event_pub.send(NodeEvent::PeerConnected {
                 id: peer_id.to_owned(),
@@ -197,6 +220,7 @@ impl PeerTracker {
             decrement_connected_peers(&self.info_tx, peer);
             peer.node_kind = NodeKind::Unknown;
             peer.archival = false;
+            peer.disconnected_at = Some(SystemTime::now());
 
             self.event_pub.send(NodeEvent::PeerDisconnected {
                 id: peer_id.to_owned(),
@@ -208,10 +232,9 @@ impl PeerTracker {
     pub(crate) fn on_agent_version(&mut self, peer_id: PeerId, agent_version: &str) {
         let peer = self.peers.entry(peer_id.to_owned()).or_default();
         let new_node_kind = NodeKind::from_agent_version(agent_version);
-        println!("{peer_id:?}: AGENT: {agent_version}, KIND: {new_node_kind:?}");
 
-        let was_full = peer.node_kind.has_full_capabilities();
-        let is_full = new_node_kind.has_full_capabilities();
+        let was_full = peer.node_kind.is_full();
+        let is_full = new_node_kind.is_full();
         peer.node_kind = new_node_kind;
 
         self.info_tx
@@ -227,9 +250,6 @@ impl PeerTracker {
                 _ => false,
             });
     }
-
-    /*
-     */
 
     pub(crate) fn mark_as_archival(&mut self, peer_id: PeerId) {
         let peer = self.peers.entry(peer_id.to_owned()).or_default();
@@ -250,31 +270,6 @@ impl PeerTracker {
             .get(&peer_id)
             .map(|peer| peer.is_connected())
             .unwrap_or(false)
-    }
-
-    /*
-    pub(crate) fn is_archival(&self, peer_id: PeerId) -> bool {
-        self.peers
-            .get(&peer_id)
-            .map(|peer| peer.archival)
-            .unwrap_or(false)
-    }
-    */
-
-    /// Returns the addresses of the peer.
-    #[allow(dead_code)]
-    pub(crate) fn addresses(&self, peer_id: PeerId) -> Option<&[Multiaddr]> {
-        Some(&self.peers.get(&peer_id)?.addrs[..])
-    }
-
-    /// Removes a peer.
-    #[allow(dead_code)]
-    pub(crate) fn remove(&mut self, peer_id: PeerId) {
-        if let Some(peer) = self.peers.remove(&peer_id) {
-            for connection_id in peer.connections {
-                self.connection_to_peer.remove(&connection_id);
-            }
-        }
     }
 
     /// Returns connected peers.
@@ -323,6 +318,10 @@ impl PeerTracker {
             }
         })
     }
+
+    pub(crate) fn gc(&mut self) {
+        //
+    }
 }
 
 fn increment_connected_peers(info_tx: &watch::Sender<PeerTrackerInfo>, trusted: bool) {
@@ -347,7 +346,7 @@ fn decrement_connected_peers(info_tx: &watch::Sender<PeerTrackerInfo>, peer: &Pe
             tracker_info.num_connected_archival_nodes -= 1;
         }
 
-        if peer.node_kind.has_full_capabilities() {
+        if peer.node_kind.is_full() {
             tracker_info.num_connected_full_nodes -= 1;
         }
     });

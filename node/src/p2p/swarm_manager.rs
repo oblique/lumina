@@ -238,6 +238,17 @@ where
         }
     }
 
+    fn connect_with_peer_id(&mut self, peer_id: PeerId) {
+        let addrs = self
+            .peer_tracker
+            .peer(peer_id)
+            .map(|p| p.addresses())
+            .unwrap_or_default()
+            .to_owned();
+
+        self.connect(peer_id, addrs);
+    }
+
     fn bootstrap(&mut self) {
         self.event_pub.send(NodeEvent::ConnectingToBootnodes);
 
@@ -253,17 +264,15 @@ where
 
     fn start_full_node_kad_query(&mut self) {
         if self.ongoing_full_node_kad_query.is_none() {
-            self.swarm
-                .behaviour_mut()
-                .kademlia
-                .get_closest_peers(FULL_NODE_TOPIC.to_vec());
-
+            // `get_providers` reports the providers in multiple steps.
+            // If kademlia has some known providers in its store, then it reports
+            // them in the first step. Kademlia also start `get_closest_peers`
+            // internally and reports new finds with `QueryResult::GetProviders`.
             let id = self
                 .swarm
                 .behaviour_mut()
                 .kademlia
                 .get_providers(FULL_NODE_TOPIC.clone());
-            println!("XXX(full): {id:?}");
 
             self.ongoing_full_node_kad_query = Some(id);
         }
@@ -271,17 +280,11 @@ where
 
     fn start_archival_node_kad_query(&mut self) {
         if self.ongoing_archival_node_kad_query.is_none() {
-            self.swarm
-                .behaviour_mut()
-                .kademlia
-                .get_closest_peers(ARCHIVAL_NODE_TOPIC.to_vec());
-
             let id = self
                 .swarm
                 .behaviour_mut()
                 .kademlia
                 .get_providers(ARCHIVAL_NODE_TOPIC.clone());
-            println!("XXX(archival): {id:?}");
 
             self.ongoing_archival_node_kad_query = Some(id);
         }
@@ -319,8 +322,6 @@ where
     pub(crate) async fn poll(&mut self) -> Result<B::ToSwarm> {
         // TODO:
         //
-        // - Call get_closest_peers for FULL_NODE_TOPIC and ARCHIVAL_NODE_TOPIC.
-        // - Mark anything that is returned with ARCHIVAL_NODE_TOPIC as archival.
         // - Garbage collect peers from peer_tracker if they are disconnected for some time.
         //
         //
@@ -359,7 +360,6 @@ where
                     {
                         self.bootstrap();
                     }
-
 
                     if self.peer_tracker.info().num_connected_full_nodes < MIN_CONNECTED_FULL_PEERS {
                         self.start_full_node_kad_query();
@@ -498,7 +498,8 @@ where
                     .ongoing_archival_node_kad_query
                     .is_some_and(|id| id == query_id);
 
-                assert!(!(is_full && is_archival));
+                // A query can not be both
+                debug_assert!(!(is_full && is_archival));
 
                 if step.last {
                     if is_full {
@@ -512,39 +513,20 @@ where
                     if let kad::GetProvidersOk::FoundProviders { providers, .. } = providers {
                         for p in providers {
                             if is_full {
-                                //self.peer_tracker.mark_as_full(p);
-                                /*
                                 if self.peer_tracker.info().num_connected_full_nodes
                                     < MIN_CONNECTED_FULL_PEERS
                                 {
-                                    let addrs = self
-                                        .peer_tracker
-                                        .addresses(p)
-                                        .unwrap_or_default()
-                                        .to_owned();
-                                    self.connect(p, addrs);
+                                    self.connect_with_peer_id(p);
                                 }
-                                */
-                            }
-
-                            if is_archival {
+                            } else if is_archival {
                                 self.peer_tracker.mark_as_archival(p);
 
-                                /*
                                 if self.peer_tracker.info().num_connected_archival_nodes
                                     < MIN_CONNECTED_ARCHIVAL_PEERS
                                 {
-                                    let addrs = self
-                                        .peer_tracker
-                                        .addresses(p)
-                                        .unwrap_or_default()
-                                        .to_owned();
-                                    self.connect(p, addrs);
+                                    self.connect_with_peer_id(p);
                                 }
-                                */
                             }
-
-                            // TODO
                         }
                     }
                 }
