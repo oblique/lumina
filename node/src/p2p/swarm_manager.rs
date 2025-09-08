@@ -452,7 +452,11 @@ where
     fn on_peer_disconnected(&mut self, peer_id: PeerId, connection_id: ConnectionId) {
         self.peer_tracker.remove_connection(peer_id, connection_id);
 
-        if self.peer_tracker.is_connected(peer_id) {
+        if self
+            .peer_tracker
+            .peer(peer_id)
+            .is_some_and(|p| !p.is_connected())
+        {
             debug!("Peer disconnected");
         }
     }

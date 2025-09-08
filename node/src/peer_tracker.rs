@@ -127,6 +127,10 @@ impl PeerTracker {
         self.peers.get(&peer_id)
     }
 
+    pub(crate) fn peers(&self) -> impl Iterator<Item = (&PeerId, &Peer)> {
+        self.peers.iter()
+    }
+
     /// Adds a peer ID.
     ///
     /// Returns `true` if peer was not known from before.
@@ -261,26 +265,6 @@ impl PeerTracker {
                 tracker_info.num_connected_archival_nodes += 1;
             });
         }
-    }
-
-    /// Returns true if peer is connected.
-    #[allow(dead_code)]
-    pub(crate) fn is_connected(&self, peer_id: PeerId) -> bool {
-        self.peers
-            .get(&peer_id)
-            .map(|peer| peer.is_connected())
-            .unwrap_or(false)
-    }
-
-    /// Returns connected peers.
-    pub(crate) fn connected_peers(&self) -> impl Iterator<Item = PeerId> + '_ {
-        self.peers.iter().filter_map(|(peer_id, peer)| {
-            if peer.is_connected() {
-                Some(*peer_id)
-            } else {
-                None
-            }
-        })
     }
 
     /// Returns all connections.

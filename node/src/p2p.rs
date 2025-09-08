@@ -867,7 +867,14 @@ where
                     .swarm
                     .context()
                     .peer_tracker
-                    .connected_peers()
+                    .peers()
+                    .filter_map(|(peer_id, peer)| {
+                        if peer.is_connected() {
+                            Some(peer_id.to_owned())
+                        } else {
+                            None
+                        }
+                    })
                     .collect();
                 respond_to.maybe_send(peers);
             }
