@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use blockstore::Blockstore;
 use futures::StreamExt;
-use libp2p::kad::QueryId;
+use libp2p::kad::{Addresses, KBucketKey, QueryId, QueryInfo};
 use libp2p::swarm::{dial_opts, NetworkInfo};
 use libp2p::{
     autonat,
@@ -36,10 +36,10 @@ use tracing::{debug, error, instrument, trace, warn};
 use void::Void;
 
 use crate::events::{EventPublisher, NodeEvent};
-use crate::p2p::connection_control;
 use crate::p2p::swarm::new_swarm;
+use crate::p2p::{connection_control, P2pError};
 use crate::p2p::{Behaviour, BehaviourEvent, Result};
-use crate::peer_tracker::{PeerTracker, PeerTrackerInfo};
+use crate::peer_tracker::{PeerTracker, PeerTrackerInfo, GC_INTERVAL};
 use crate::store::Store;
 use crate::utils::{celestia_protocol_id, MultiaddrExt};
 
@@ -114,8 +114,7 @@ where
     bootnodes: HashMap<PeerId, Vec<Multiaddr>>,
     listeners: SmallVec<[ListenerId; 1]>,
     kademlia_interval: Interval,
-    ongoing_full_node_kad_query: Option<QueryId>,
-    ongoing_archival_node_kad_query: Option<QueryId>,
+    gc_interval: Interval,
 }
 
 pub(crate) struct SwarmContext<'a, B>
@@ -145,7 +144,7 @@ where
         let connection_control = connection_control::Behaviour::new();
         let autonat = autonat::Behaviour::new(local_peer_id, autonat::Config::default());
         let ping = ping::Behaviour::new(ping::Config::default());
-        let kademlia = init_kademlia(network_id, keypair, bootnodes, listen_on)?;
+        let kademlia = init_kademlia(network_id, keypair, listen_on)?;
 
         let agent_version = format!("lumina/{}/{}", network_id, env!("CARGO_PKG_VERSION"));
         let identify_config = identify::Config::new(String::new(), keypair.public())
@@ -192,6 +191,7 @@ where
 
         let peer_tracker_info_watcher = peer_tracker.info_watcher();
         let kademlia_interval = Interval::new(Duration::from_secs(30)).await;
+        let gc_interval = Interval::new(GC_INTERVAL).await;
 
         let mut manager = SwarmManager {
             swarm,
@@ -201,8 +201,7 @@ where
             bootnodes: bootnodes_map,
             listeners,
             kademlia_interval,
-            ongoing_full_node_kad_query: None,
-            ongoing_archival_node_kad_query: None,
+            gc_interval,
         };
 
         manager.bootstrap();
@@ -219,7 +218,13 @@ where
         }
     }
 
-    fn connect(&mut self, peer_id: PeerId, addresses: Vec<Multiaddr>) {
+    fn connect(&mut self, peer_id: PeerId, addresses: impl Into<Option<Vec<Multiaddr>>>) {
+        if self.peer_tracker.is_connected(peer_id) {
+            return;
+        }
+
+        let addresses = addresses.into().unwrap_or_default();
+
         let dial_opts = DialOpts::peer_id(peer_id)
             // Tell Swarm not to dial if peer is already connected or there
             // is an ongoing dialing.
@@ -238,56 +243,92 @@ where
         }
     }
 
-    fn connect_with_peer_id(&mut self, peer_id: PeerId) {
-        let addrs = self
-            .peer_tracker
-            .peer(peer_id)
-            .map(|p| p.addresses())
-            .unwrap_or_default()
-            .to_owned();
+    fn find_node_and_connect(&mut self, peer_id: PeerId) {
+        let kad_entry_exists = self
+            .swarm
+            .behaviour_mut()
+            .kademlia
+            .kbucket(peer_id)
+            .map(|bucket| {
+                bucket
+                    .iter()
+                    .any(|entry| *entry.node.key.preimage() == peer_id)
+            })
+            .unwrap_or(false);
 
-        self.connect(peer_id, addrs);
+        // Swarm will ask kademlia for the addresses of the peer_id,
+        // but this is successful only when a kademlia entry exists.
+        if kad_entry_exists {
+            self.connect(peer_id, None);
+            return;
+        }
+
+        // When kademlia entry does not exist then we need to initiate
+        // a `get_closest_peers` query in order to find the addresses.
+        let peer_id_bytes = peer_id.to_bytes();
+        let kad_query_exists = self
+            .swarm
+            .behaviour_mut()
+            .kademlia
+            .iter_queries()
+            .any(|query| match query.info() {
+                QueryInfo::GetClosestPeers { key, .. } => *key == peer_id_bytes,
+                _ => false,
+            });
+
+        if !kad_query_exists {
+            // When kademlia finds the addresses via get_closest_peers, it will
+            // also automatically dial them.
+            self.swarm
+                .behaviour_mut()
+                .kademlia
+                .get_closest_peers(peer_id);
+        }
     }
 
     fn bootstrap(&mut self) {
         self.event_pub.send(NodeEvent::ConnectingToBootnodes);
 
         for (peer_id, addrs) in self.bootnodes.clone() {
+            for addr in &addrs {
+                self.swarm
+                    .behaviour_mut()
+                    .kademlia
+                    .add_address(&peer_id, addr.to_owned());
+            }
+
             self.connect(peer_id, addrs);
         }
 
-        // trigger kademlia bootstrap
-        if self.swarm.behaviour_mut().kademlia.bootstrap().is_err() {
-            warn!("Can't run kademlia bootstrap, no known peers");
+        if let Err(e) = self.swarm.behaviour_mut().kademlia.bootstrap() {
+            warn!("Can't run kademlia bootstrap: {e}");
         }
     }
 
-    fn start_full_node_kad_query(&mut self) {
-        if self.ongoing_full_node_kad_query.is_none() {
+    fn start_get_providers_kad_query(&mut self, topic: &RecordKey) {
+        let kad_query_exists = self.swarm.behaviour_mut().kademlia.iter_queries().any(
+            |query| matches!(query.info(), QueryInfo::GetProviders { key, .. } if key == topic),
+        );
+
+        if !kad_query_exists {
             // `get_providers` reports the providers in multiple steps.
             // If kademlia has some known providers in its store, then it reports
-            // them in the first step. Kademlia also start `get_closest_peers`
+            // them in the first step. Kademlia also starts `get_closest_peers`
             // internally and reports new finds with `QueryResult::GetProviders`.
             let id = self
                 .swarm
                 .behaviour_mut()
                 .kademlia
-                .get_providers(FULL_NODE_TOPIC.clone());
-
-            self.ongoing_full_node_kad_query = Some(id);
+                .get_providers(topic.to_owned());
         }
     }
 
-    fn start_archival_node_kad_query(&mut self) {
-        if self.ongoing_archival_node_kad_query.is_none() {
-            let id = self
-                .swarm
-                .behaviour_mut()
-                .kademlia
-                .get_providers(ARCHIVAL_NODE_TOPIC.clone());
+    fn start_full_node_kad_query(&mut self) {
+        self.start_get_providers_kad_query(&*FULL_NODE_TOPIC);
+    }
 
-            self.ongoing_archival_node_kad_query = Some(id);
-        }
+    fn start_archival_node_kad_query(&mut self) {
+        self.start_get_providers_kad_query(&*ARCHIVAL_NODE_TOPIC);
     }
 
     pub(crate) fn network_info(&self) -> NetworkInfo {
@@ -320,54 +361,44 @@ where
     }
 
     pub(crate) async fn poll(&mut self) -> Result<B::ToSwarm> {
-        // TODO:
-        //
-        // - Garbage collect peers from peer_tracker if they are disconnected for some time.
-        //
-        //
-        /*
-                     *
-
-        let key = peer_manager::topic_to_dht_key("/full/v0.1.0");
-        let key = peer_manager::topic_to_dht_key("/archival/v0.1.0");
-                    let id = self
-                        .swarm
-                        .behaviour_mut()
-                        .kademlia
-                        .get_closest_peers(key.to_vec());
-
-
-                    let id = self.swarm.behaviour_mut().kademlia.get_providers(key.clone());
-                     *
-                     */
-
         loop {
+            dbg!(self.swarm.behaviour_mut().kademlia.iter_queries().count());
+
             select! {
-                // We use info watcher here in order to act only once when the connected
-                // peers are zero.
-                // TODO: find a way to remove it
                 _ = self.peer_tracker_info_watcher.changed() => {
-                    if self.peer_tracker_info_watcher.borrow().num_connected_peers == 0 {
+                    let info = self.peer_tracker.info();
+
+                    if info.num_connected_peers == 0 {
                         warn!("All peers disconnected");
                         self.bootstrap();
                     }
 
-                    dbg!(self.peer_tracker_info_watcher.borrow());
+                    if info.num_connected_full_nodes < MIN_CONNECTED_FULL_PEERS {
+                        self.start_full_node_kad_query();
+                    }
 
+                    if info.num_connected_archival_nodes < MIN_CONNECTED_ARCHIVAL_PEERS {
+                        self.start_archival_node_kad_query();
+                    }
                 }
                 _ = self.kademlia_interval.tick() => {
-                    if self.peer_tracker.info().num_connected_peers < MIN_CONNECTED_PEERS
+                    let info = self.peer_tracker.info();
+
+                    if info.num_connected_peers < MIN_CONNECTED_PEERS
                     {
                         self.bootstrap();
                     }
 
-                    if self.peer_tracker.info().num_connected_full_nodes < MIN_CONNECTED_FULL_PEERS {
+                    if info.num_connected_full_nodes < MIN_CONNECTED_FULL_PEERS {
                         self.start_full_node_kad_query();
                     }
 
-                    if self.peer_tracker.info().num_connected_archival_nodes < MIN_CONNECTED_ARCHIVAL_PEERS {
+                    if info.num_connected_archival_nodes < MIN_CONNECTED_ARCHIVAL_PEERS {
                         self.start_archival_node_kad_query();
                     }
+                }
+                _ = self.gc_interval.tick() => {
+                    self.peer_tracker.gc();
                 }
                 ev = self.swarm.select_next_some() => {
                     if let Some(ev) = self.on_swarm_event(ev).await {
@@ -394,10 +425,9 @@ where
             SwarmEvent::ConnectionEstablished {
                 peer_id,
                 connection_id,
-                endpoint,
                 ..
             } => {
-                self.on_peer_connected(peer_id, connection_id, endpoint);
+                self.on_peer_connected(peer_id, connection_id);
             }
             SwarmEvent::ConnectionClosed {
                 peer_id,
@@ -422,41 +452,16 @@ where
     }
 
     #[instrument(skip_all, fields(peer_id = %peer_id))]
-    fn on_peer_connected(
-        &mut self,
-        peer_id: PeerId,
-        connection_id: ConnectionId,
-        endpoint: ConnectedPoint,
-    ) {
+    fn on_peer_connected(&mut self, peer_id: PeerId, connection_id: ConnectionId) {
         debug!("Peer connected");
-
-        // Inform PeerTracker about the dialed address.
-        //
-        // We do this because Kademlia send commands to Swarm
-        // for dialing a peer and we may not have that address
-        // in PeerTracker.
-        let dialed_addr = match endpoint {
-            ConnectedPoint::Dialer {
-                address,
-                role_override: Endpoint::Dialer,
-                ..
-            } => Some(address),
-            _ => None,
-        };
-
-        self.peer_tracker
-            .add_connection(peer_id, connection_id, dialed_addr);
+        self.peer_tracker.add_connection(peer_id, connection_id);
     }
 
     #[instrument(skip_all, fields(peer_id = %peer_id))]
     fn on_peer_disconnected(&mut self, peer_id: PeerId, connection_id: ConnectionId) {
         self.peer_tracker.remove_connection(peer_id, connection_id);
 
-        if self
-            .peer_tracker
-            .peer(peer_id)
-            .is_some_and(|p| !p.is_connected())
-        {
+        if !self.peer_tracker.is_connected(peer_id) {
             debug!("Peer disconnected");
         }
     }
@@ -484,51 +489,23 @@ where
     #[instrument(level = "trace", skip(self))]
     fn on_kademlia_event(&mut self, ev: kad::Event) {
         match ev {
-            kad::Event::RoutingUpdated {
-                peer, addresses, ..
-            } => {
-                self.peer_tracker.add_addresses(peer, addresses.iter());
-            }
-            kad::Event::OutboundQueryProgressed {
-                id: query_id,
-                result,
-                step,
-                ..
-            } => {
-                let is_full = self
-                    .ongoing_full_node_kad_query
-                    .is_some_and(|id| id == query_id);
-                let is_archival = self
-                    .ongoing_archival_node_kad_query
-                    .is_some_and(|id| id == query_id);
-
-                // A query can not be both
-                debug_assert!(!(is_full && is_archival));
-
-                if step.last {
-                    if is_full {
-                        self.ongoing_full_node_kad_query.take();
-                    } else if is_archival {
-                        self.ongoing_archival_node_kad_query.take();
-                    }
-                }
-
+            kad::Event::OutboundQueryProgressed { result, .. } => {
                 if let kad::QueryResult::GetProviders(Ok(providers)) = result {
-                    if let kad::GetProvidersOk::FoundProviders { providers, .. } = providers {
+                    if let kad::GetProvidersOk::FoundProviders { key, providers } = providers {
                         for p in providers {
-                            if is_full {
+                            if key == *FULL_NODE_TOPIC {
                                 if self.peer_tracker.info().num_connected_full_nodes
                                     < MIN_CONNECTED_FULL_PEERS
                                 {
-                                    self.connect_with_peer_id(p);
+                                    self.find_node_and_connect(p);
                                 }
-                            } else if is_archival {
+                            } else if key == *ARCHIVAL_NODE_TOPIC {
                                 self.peer_tracker.mark_as_archival(p);
 
                                 if self.peer_tracker.info().num_connected_archival_nodes
                                     < MIN_CONNECTED_ARCHIVAL_PEERS
                                 {
-                                    self.connect_with_peer_id(p);
+                                    self.find_node_and_connect(p);
                                 }
                             }
                         }
@@ -601,7 +578,6 @@ where
 fn init_kademlia(
     network_id: &str,
     keypair: &Keypair,
-    bootnodes: &[Multiaddr],
     listen_on: &[Multiaddr],
 ) -> Result<kad::Behaviour<kad::store::MemoryStore>> {
     let local_peer_id = PeerId::from(keypair.public());
@@ -611,12 +587,6 @@ fn init_kademlia(
     let config = kad::Config::new(protocol_id);
 
     let mut kademlia = kad::Behaviour::with_config(local_peer_id, store, config);
-
-    for addr in bootnodes {
-        if let Some(peer_id) = addr.peer_id() {
-            kademlia.add_address(&peer_id, addr.to_owned());
-        }
-    }
 
     if !listen_on.is_empty() {
         kademlia.set_mode(Some(kad::Mode::Server));

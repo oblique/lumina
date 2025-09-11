@@ -2,16 +2,22 @@
 
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::time::Duration;
 use std::{borrow::Borrow, mem};
 
 use libp2p::{swarm::ConnectionId, Multiaddr, PeerId};
-use lumina_utils::time::SystemTime;
+use lumina_utils::time::Instant;
 use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use tokio::sync::watch;
 
 use crate::events::{EventPublisher, NodeEvent};
+
+/// How ofter garbage collector should be called.
+pub(crate) const GC_INTERVAL: Duration = Duration::from_secs(30);
+/// How much time a `Peer` needs to be disconnected to get expired.
+const EXPIRED_AFTER: Duration = Duration::from_secs(120);
 
 /// Keeps track various information about peers.
 #[derive(Debug)]
@@ -34,14 +40,14 @@ pub struct PeerTrackerInfo {
     pub num_connected_archival_nodes: u64,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub(crate) struct Peer {
-    addresses: SmallVec<[Multiaddr; 4]>,
+    //    addresses: SmallVec<[Multiaddr; 4]>,
     connections: SmallVec<[ConnectionId; 1]>,
     trusted: bool,
     archival: bool,
     node_kind: NodeKind,
-    disconnected_at: Option<SystemTime>,
+    disconnected_at: Option<Instant>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -75,9 +81,11 @@ impl NodeKind {
 }
 
 impl Peer {
+    /*
     pub(crate) fn addresses(&self) -> &[Multiaddr] {
         &self.addresses
     }
+    */
 
     pub(crate) fn is_connected(&self) -> bool {
         !self.connections.is_empty()
@@ -95,9 +103,25 @@ impl Peer {
         self.node_kind
     }
 
+    /*
     fn add_address(&mut self, addr: Multiaddr) {
         if !self.addresses.contains(&addr) {
             self.addresses.push(addr);
+        }
+    }
+    */
+}
+
+impl Default for Peer {
+    fn default() -> Self {
+        Peer {
+            // addresses: SmallVec::new(),
+            connections: SmallVec::new(),
+            trusted: false,
+            archival: false,
+            node_kind: NodeKind::Unknown,
+            // We start as disconnected
+            disconnected_at: Some(Instant::now()),
         }
     }
 }
@@ -131,6 +155,10 @@ impl PeerTracker {
         self.peers.iter()
     }
 
+    pub(crate) fn is_connected(&self, peer_id: PeerId) -> bool {
+        self.peer(peer_id).is_some_and(|p| p.is_connected())
+    }
+
     /// Adds a peer ID.
     ///
     /// Returns `true` if peer was not known from before.
@@ -144,6 +172,7 @@ impl PeerTracker {
         }
     }
 
+    /*
     /// Add addresses of a peer.
     pub(crate) fn add_addresses<I, A>(&mut self, peer_id: PeerId, addrs: I)
     where
@@ -156,6 +185,7 @@ impl PeerTracker {
             peer.add_address(addr.borrow().to_owned());
         }
     }
+    */
 
     /// Sets peer as trusted.
     pub(crate) fn set_trusted(&mut self, peer_id: PeerId, is_trusted: bool) {
@@ -186,14 +216,16 @@ impl PeerTracker {
         &mut self,
         peer_id: PeerId,
         connection_id: ConnectionId,
-        address: impl Into<Option<Multiaddr>>,
+        //address: impl Into<Option<Multiaddr>>,
     ) {
         let peer = self.peers.entry(peer_id.to_owned()).or_default();
         let prev_connected = peer.is_connected();
 
+        /*
         if let Some(address) = address.into() {
             peer.add_address(address);
         }
+        */
 
         peer.connections.push(connection_id);
         self.connection_to_peer.insert(connection_id, peer_id);
@@ -224,7 +256,7 @@ impl PeerTracker {
             decrement_connected_peers(&self.info_tx, peer);
             peer.node_kind = NodeKind::Unknown;
             peer.archival = false;
-            peer.disconnected_at = Some(SystemTime::now());
+            peer.disconnected_at = Some(Instant::now());
 
             self.event_pub.send(NodeEvent::PeerDisconnected {
                 id: peer_id.to_owned(),
@@ -304,7 +336,20 @@ impl PeerTracker {
     }
 
     pub(crate) fn gc(&mut self) {
-        //
+        println!("GC BEFORE: {}", self.peers.len());
+
+        self.peers.retain(|_, peer| {
+            // We keep the connected peers
+            peer.is_connected()
+                // The trusted peers
+                || peer.is_trusted()
+                // And the recently disconnected ones
+                || peer
+                    .disconnected_at
+                    .is_none_or(|tm| tm.elapsed() <= EXPIRED_AFTER)
+        });
+
+        println!("GC AFTER: {}", self.peers.len());
     }
 }
 
