@@ -42,7 +42,6 @@ pub struct PeerTrackerInfo {
 
 #[derive(Clone, Debug)]
 pub(crate) struct Peer {
-    //    addresses: SmallVec<[Multiaddr; 4]>,
     connections: SmallVec<[ConnectionId; 1]>,
     trusted: bool,
     archival: bool,
@@ -81,12 +80,6 @@ impl NodeKind {
 }
 
 impl Peer {
-    /*
-    pub(crate) fn addresses(&self) -> &[Multiaddr] {
-        &self.addresses
-    }
-    */
-
     pub(crate) fn is_connected(&self) -> bool {
         !self.connections.is_empty()
     }
@@ -102,20 +95,11 @@ impl Peer {
     pub(crate) fn node_kind(&self) -> NodeKind {
         self.node_kind
     }
-
-    /*
-    fn add_address(&mut self, addr: Multiaddr) {
-        if !self.addresses.contains(&addr) {
-            self.addresses.push(addr);
-        }
-    }
-    */
 }
 
 impl Default for Peer {
     fn default() -> Self {
         Peer {
-            // addresses: SmallVec::new(),
             connections: SmallVec::new(),
             trusted: false,
             archival: false,
@@ -172,21 +156,6 @@ impl PeerTracker {
         }
     }
 
-    /*
-    /// Add addresses of a peer.
-    pub(crate) fn add_addresses<I, A>(&mut self, peer_id: PeerId, addrs: I)
-    where
-        I: IntoIterator<Item = A>,
-        A: Borrow<Multiaddr>,
-    {
-        let peer = self.peers.entry(peer_id.to_owned()).or_default();
-
-        for addr in addrs {
-            peer.add_address(addr.borrow().to_owned());
-        }
-    }
-    */
-
     /// Sets peer as trusted.
     pub(crate) fn set_trusted(&mut self, peer_id: PeerId, is_trusted: bool) {
         let peer = self.peers.entry(peer_id.to_owned()).or_default();
@@ -212,20 +181,9 @@ impl PeerTracker {
     }
 
     /// Add an active connection of a peer.
-    pub(crate) fn add_connection(
-        &mut self,
-        peer_id: PeerId,
-        connection_id: ConnectionId,
-        //address: impl Into<Option<Multiaddr>>,
-    ) {
+    pub(crate) fn add_connection(&mut self, peer_id: PeerId, connection_id: ConnectionId) {
         let peer = self.peers.entry(peer_id.to_owned()).or_default();
         let prev_connected = peer.is_connected();
-
-        /*
-        if let Some(address) = address.into() {
-            peer.add_address(address);
-        }
-        */
 
         peer.connections.push(connection_id);
         self.connection_to_peer.insert(connection_id, peer_id);
@@ -336,8 +294,6 @@ impl PeerTracker {
     }
 
     pub(crate) fn gc(&mut self) {
-        println!("GC BEFORE: {}", self.peers.len());
-
         self.peers.retain(|_, peer| {
             // We keep the connected peers
             peer.is_connected()
@@ -348,8 +304,6 @@ impl PeerTracker {
                     .disconnected_at
                     .is_none_or(|tm| tm.elapsed() <= EXPIRED_AFTER)
         });
-
-        println!("GC AFTER: {}", self.peers.len());
     }
 }
 
@@ -399,7 +353,7 @@ mod tests {
         tracker.set_trusted(peer, true);
         assert!(!watcher.has_changed().unwrap());
 
-        tracker.add_connection(peer, ConnectionId::new_unchecked(1), None);
+        tracker.add_connection(peer, ConnectionId::new_unchecked(1));
         assert!(tracker.is_connected(peer));
         assert!(watcher.has_changed().unwrap());
         let info = watcher.borrow_and_update().to_owned();
@@ -416,7 +370,7 @@ mod tests {
 
         assert!(!watcher.has_changed().unwrap());
 
-        tracker.add_connection(peer, ConnectionId::new_unchecked(1), None);
+        tracker.add_connection(peer, ConnectionId::new_unchecked(1));
         assert!(tracker.is_connected(peer));
         assert!(watcher.has_changed().unwrap());
         let info = watcher.borrow_and_update().to_owned();
@@ -442,7 +396,7 @@ mod tests {
         tracker.set_trusted(peer, true);
         assert!(!watcher.has_changed().unwrap());
 
-        tracker.add_connection(peer, ConnectionId::new_unchecked(1), None);
+        tracker.add_connection(peer, ConnectionId::new_unchecked(1));
         assert!(tracker.is_connected(peer));
         assert!(watcher.has_changed().unwrap());
         let info = watcher.borrow_and_update().to_owned();
@@ -463,7 +417,7 @@ mod tests {
         let mut watcher = tracker.info_watcher();
         let peer = PeerId::random();
 
-        tracker.add_connection(peer, ConnectionId::new_unchecked(1), None);
+        tracker.add_connection(peer, ConnectionId::new_unchecked(1));
         assert!(tracker.is_connected(peer));
         assert!(watcher.has_changed().unwrap());
         let info = watcher.borrow_and_update().to_owned();
@@ -524,7 +478,7 @@ mod tests {
         );
 
         // Peer gets reconnected
-        tracker.add_connection(peer, ConnectionId::new_unchecked(2), None);
+        tracker.add_connection(peer, ConnectionId::new_unchecked(2));
         assert!(tracker.is_connected(peer));
         assert!(watcher.has_changed().unwrap());
         let info = watcher.borrow_and_update().to_owned();

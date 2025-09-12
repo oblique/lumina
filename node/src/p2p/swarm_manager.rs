@@ -362,8 +362,6 @@ where
 
     pub(crate) async fn poll(&mut self) -> Result<B::ToSwarm> {
         loop {
-            dbg!(self.swarm.behaviour_mut().kademlia.iter_queries().count());
-
             select! {
                 _ = self.peer_tracker_info_watcher.changed() => {
                     let info = self.peer_tracker.info();
@@ -413,7 +411,6 @@ where
         &mut self,
         ev: SwarmEvent<SwarmBehaviourEvent<B>>,
     ) -> Option<B::ToSwarm> {
-        //dbg!(&ev);
         match ev {
             SwarmEvent::Behaviour(ev) => match ev {
                 SwarmBehaviourEvent::Identify(ev) => self.on_identify_event(ev),
