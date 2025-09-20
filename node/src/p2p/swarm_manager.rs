@@ -46,7 +46,7 @@ use crate::utils::{celestia_protocol_id, MultiaddrExt};
 // Minimal number of peers that we want to maintain connection to.
 // If we have fewer peers than that, we will try to reconnect / discover
 // more aggresively.
-const MIN_CONNECTED_PEERS: u64 = 4;
+const MIN_CONNECTED_PEERS: u64 = 5;
 
 /*
 
@@ -283,6 +283,34 @@ where
                 .behaviour_mut()
                 .kademlia
                 .get_closest_peers(peer_id);
+        }
+    }
+
+    fn connect_to_bootnodes(&mut self) {
+        // Collect all the bootnodes that are not currently connected.
+        let bootnodes = self
+            .bootnodes
+            .iter()
+            .filter(|peer_id, _| !self.peer_tracker.is_connected(peer_id))
+            .collect::<Vec<_>>();
+
+        if bootnotes.is_empty() {
+            return;
+        }
+
+        // We produce this event only if we are going to connect to at least
+        // one bootnode.
+        self.event_pub.send(NodeEvent::ConnectingToBootnodes);
+
+        for (peer_id, addrs) in bootnodes {
+            for addr in &addrs {
+                self.swarm
+                    .behaviour_mut()
+                    .kademlia
+                    .add_address(&peer_id, addr.to_owned());
+            }
+
+            self.connect(peer_id, addrs);
         }
     }
 

@@ -139,6 +139,10 @@ impl PeerTracker {
         self.peers.iter()
     }
 
+    pub(crate) fn connected_peers(&self) -> impl Iterator<Item = (&PeerId, &Peer)> {
+        self.peers.iter().filter(|(_, peer)| peer.is_connected())
+    }
+
     pub(crate) fn is_connected(&self, peer_id: PeerId) -> bool {
         self.peer(peer_id).is_some_and(|p| p.is_connected())
     }
