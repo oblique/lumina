@@ -122,10 +122,6 @@ pub enum Error {
     #[error("RPC endpoint not set")]
     RpcEndpointNotSet,
 
-    /// Signer is not set.
-    #[error("gRPC endpoint is set but singer is not")]
-    SignerNotSet,
-
     /// gRPC endpoint is not set.
     #[error("Signer is set but gRPC endpoint is not")]
     GrpcEndpointNotSet,

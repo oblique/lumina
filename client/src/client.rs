@@ -268,8 +268,11 @@ impl ClientBuilder {
                 let pubkey = client.get_account_pubkey().expect("signer to be set");
                 (Some(pubkey), Some(client))
             }
+            (false, true) => {
+                let client = self.grpc_builder.build()?;
+                (None, Some(client))
+            }
             (false, false) => (None, None),
-            (false, true) => return Err(Error::SignerNotSet),
             (true, false) => return Err(Error::GrpcEndpointNotSet),
         };
 

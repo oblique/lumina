@@ -48,6 +48,10 @@ const BLOB_TX_TYPE_ID: &str = "BLOB";
 
 struct AccountState {
     account: Account,
+}
+
+#[derive(Clone)]
+struct ChainInfo {
     app_version: AppVersion,
     chain_id: Id,
 }
@@ -63,6 +67,7 @@ pub(crate) struct SignerConfig {
 pub struct GrpcClient {
     transport: BoxedTransport,
     account: Mutex<Option<AccountState>>,
+    chain_info: Mutex<Option<ChainInfo>>,
     signer: Option<SignerConfig>,
 }
 
@@ -72,6 +77,7 @@ impl GrpcClient {
         Self {
             transport,
             account: Mutex::new(None),
+            chain_info: Mutex::new(None),
             signer,
         }
     }
@@ -370,25 +376,34 @@ impl GrpcClient {
         self.confirm_tx(tx_hash, sequence).await
     }
 
-    async fn load_account(&self) -> Result<(MappedMutexGuard<'_, AccountState>, &SignerConfig)> {
-        let signer = self.signer.as_ref().ok_or(Error::NoAccount)?;
-        let mut account_guard = self.account.lock().await;
+    async fn load_chain_info(&self) -> Result<ChainInfo> {
+        let mut chain_info_guard = self.chain_info.lock().await;
 
-        if account_guard.is_none() {
-            let address = AccAddress::from(signer.pubkey);
-            let account = self.get_account(&address).await?;
-
+        if chain_info_guard.is_none() {
             let block = self.get_latest_block().await?;
             let app_version = block.header.version.app;
             let app_version = AppVersion::from_u64(app_version)
                 .ok_or(celestia_types::Error::UnsupportedAppVersion(app_version))?;
             let chain_id = block.header.chain_id;
 
-            *account_guard = Some(AccountState {
-                account,
+            *chain_info_guard = Some(ChainInfo {
                 app_version,
                 chain_id,
-            })
+            });
+        }
+
+        Ok(chain_info_guard.clone().expect("chain info present"))
+    }
+
+    async fn load_account(&self) -> Result<(MappedMutexGuard<'_, AccountState>, &SignerConfig)> {
+        let signer = self.signer.as_ref().ok_or(Error::MissingSigner)?;
+        let mut account_guard = self.account.lock().await;
+
+        if account_guard.is_none() {
+            let address = AccAddress::from(signer.pubkey);
+            let account = self.get_account(&address).await?;
+
+            *account_guard = Some(AccountState { account })
         }
         let mapped_guard = MutexGuard::map(account_guard, |acc| {
             acc.as_mut().expect("account data present")
@@ -406,7 +421,7 @@ impl GrpcClient {
         chain_id: Id,
         account: &BaseAccount,
     ) -> Result<(u64, f64)> {
-        let signer = self.signer.as_ref().ok_or(Error::NoAccount)?;
+        let signer = self.signer.as_ref().ok_or(Error::MissingSigner)?;
 
         Ok(match (cfg.gas_limit, cfg.gas_price) {
             (Some(gas_limit), Some(gas_price)) => (gas_limit, gas_price),
@@ -442,6 +457,7 @@ impl GrpcClient {
         // lock the account; tx signing and broadcast must be atomic
         // because node requires all transactions to be sequenced by account.sequence
         let (account, signer) = self.load_account().await?;
+        let chain_info = self.load_chain_info().await?;
 
         let pfb = MsgPayForBlobs::new(&blobs, account.account.address.clone())?;
         let pfb = RawTxBody {
@@ -454,7 +470,7 @@ impl GrpcClient {
             .calculate_transaction_gas_params(
                 &pfb,
                 &cfg,
-                account.chain_id.clone(),
+                chain_info.chain_id.clone(),
                 &account.account,
             )
             .await?;
@@ -462,7 +478,7 @@ impl GrpcClient {
         let fee = (gas_limit as f64 * gas_price).ceil() as u64;
         let tx = sign_tx(
             pfb,
-            account.chain_id.clone(),
+            chain_info.chain_id.clone(),
             &account.account,
             &signer.pubkey,
             &signer.signer,
@@ -484,15 +500,21 @@ impl GrpcClient {
 
     async fn sign_and_broadcast_tx(&self, tx: RawTxBody, cfg: TxConfig) -> Result<(Hash, u64)> {
         let (account, signer) = self.load_account().await?;
+        let chain_info = self.load_chain_info().await?;
 
         let (gas_limit, gas_price) = self
-            .calculate_transaction_gas_params(&tx, &cfg, account.chain_id.clone(), &account.account)
+            .calculate_transaction_gas_params(
+                &tx,
+                &cfg,
+                chain_info.chain_id.clone(),
+                &account.account,
+            )
             .await?;
 
         let fee = (gas_limit as f64 * gas_price).ceil();
         let tx = sign_tx(
             tx,
-            account.chain_id.clone(),
+            chain_info.chain_id.clone(),
             &account.account,
             &signer.pubkey,
             &signer.signer,
@@ -577,21 +599,15 @@ impl GrpcClient {
     }
 
     /// Get client's app version
-    ///
-    /// Note that this function _may_ try to load the account information from the network and as
-    /// such requires signed to be set up.
     pub async fn app_version(&self) -> Result<AppVersion> {
-        let (account, _) = self.load_account().await?;
-        Ok(account.app_version)
+        let chain_info = self.load_chain_info().await?;
+        Ok(chain_info.app_version)
     }
 
     /// Get client's chain id
-    ///
-    /// Note that this function _may_ try to load the account information from the network and as
-    /// such requires signed to be set up.
     pub async fn chain_id(&self) -> Result<Id> {
-        let (account, _) = self.load_account().await?;
-        Ok(account.chain_id.clone())
+        let chain_info = self.load_chain_info().await?;
+        Ok(chain_info.chain_id.clone())
     }
 
     /// Get client's account public key if the signer is set
