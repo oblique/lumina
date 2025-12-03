@@ -59,6 +59,7 @@ pub(crate) struct Inner {
     // https://github.com/celestiaorg/celestia-node/blob/76db37cc4ac09e892122a081b8bea24f87899f11/specs/src/shrex/shrex-sub.md#why-not-gossipsub
     shrex_sub: gossipsub::Behaviour,
     row_req_resp: request_response::Behaviour<RowCodec>,
+    sample_req_resp: request_response::Behaviour<SampleCodec>,
 }
 
 #[derive(Debug)]
@@ -105,6 +106,13 @@ where
                     )],
                     request_response::Config::default(),
                 ),
+                sample_req_resp: request_response::Behaviour::new(
+                    [(
+                        protocol_id(config.network_id, "/shrex/v0.1.0/sample_v0"),
+                        ProtocolSupport::Full,
+                    )],
+                    request_response::Config::default(),
+                ),
             },
             _client: Client::new(),
             _da_pools: HashMap::new(),
@@ -125,11 +133,77 @@ where
                 self.on_row_req_resp_event(ev);
                 None
             }
+            ToSwarm::GenerateEvent(InnerEvent::SampleReqResp(ev)) => {
+                self.on_sample_req_resp_event(ev);
+                None
+            }
             _ => Some(ev.map_out(|_| unreachable!("GenerateEvent handled"))),
         }
     }
 
+    pub(crate) fn get_row(&mut self, height: u64, index: u16) {
+        //
+    }
+
     fn on_row_req_resp_event(&mut self, ev: RowReqRespEvent) {
+        match ev {
+            // Received a response for an ongoing outbound request
+            RowReqRespEvent::Message {
+                message:
+                    RowReqRespMessage::Response {
+                        request_id,
+                        response,
+                    },
+                peer,
+                ..
+            } => {
+                todo!();
+            }
+
+            // Failure while client requests
+            RowReqRespEvent::OutboundFailure {
+                peer,
+                request_id,
+                error,
+                ..
+            } => {
+                todo!();
+            }
+
+            // Received new inbound request
+            RowReqRespEvent::Message {
+                message:
+                    RowReqRespMessage::Request {
+                        request_id,
+                        request,
+                        channel,
+                    },
+                peer,
+                ..
+            } => {
+                todo!();
+            }
+
+            // Response to inbound request was sent
+            RowReqRespEvent::ResponseSent {
+                peer, request_id, ..
+            } => {
+                todo!();
+            }
+
+            // Failure while server responds
+            RowReqRespEvent::InboundFailure {
+                peer,
+                request_id,
+                error,
+                ..
+            } => {
+                todo!();
+            }
+        }
+    }
+
+    fn on_sample_req_resp_event(&mut self, ev: SampleReqRespEvent) {
         match ev {
             // Received a response for an ongoing outbound request
             RowReqRespEvent::Message {

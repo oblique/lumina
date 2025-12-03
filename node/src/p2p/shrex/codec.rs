@@ -67,3 +67,59 @@ impl Codec for RowCodec {
         todo!()
     }
 }
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct SampleCodec;
+
+#[async_trait]
+impl Codec for SampleCodec {
+    type Protocol = StreamProtocol;
+    type Request = SampleId;
+    type Response = Sample;
+
+    async fn read_request<T>(
+        &mut self,
+        protocol: &Self::Protocol,
+        io: &mut T,
+    ) -> io::Result<Self::Request>
+    where
+        T: AsyncRead + Unpin + Send,
+    {
+        todo!();
+    }
+
+    async fn read_response<T>(
+        &mut self,
+        _: &Self::Protocol,
+        _io: &mut T,
+    ) -> io::Result<Self::Response>
+    where
+        T: AsyncRead + Unpin + Send,
+    {
+        todo!()
+    }
+
+    async fn write_request<T>(
+        &mut self,
+        _: &Self::Protocol,
+        _io: &mut T,
+        _req: Self::Request,
+    ) -> io::Result<()>
+    where
+        T: AsyncWrite + Unpin + Send,
+    {
+        todo!()
+    }
+
+    async fn write_response<T>(
+        &mut self,
+        _: &Self::Protocol,
+        _io: &mut T,
+        _resps: Self::Response,
+    ) -> io::Result<()>
+    where
+        T: AsyncWrite + Unpin + Send,
+    {
+        todo!()
+    }
+}
