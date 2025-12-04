@@ -169,6 +169,8 @@ where
     Ok(buf)
 }
 
+/*
+
 pub(crate) fn try_read_byte<T>(io: &mut T) -> Option<u8>
 where
     T: AsyncRead + Unpin + Send,
@@ -182,3 +184,4 @@ where
         Err(_) => None,
     }
 }
+*/

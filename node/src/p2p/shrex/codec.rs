@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::BytesMut;
-use celestia_proto::shwap::{Row as RawRow, Share as RawShare};
+use celestia_proto::shwap::{Row as RawRow, Sample as RawSample};
 use celestia_types::row::{ROW_ID_SIZE, Row, RowId};
 use celestia_types::sample::{Sample, SampleId};
 use futures::{AsyncRead, AsyncWrite};
@@ -16,7 +16,7 @@ use std::marker::PhantomData;
 
 use crate::utils::{parse_protocol_id, protocol_id, read_up_to};
 
-trait ByteCodec: Send {
+pub(super) trait ByteCodec: Send {
     const MAX_SIZE: usize;
     const TIMEOUT: Duration;
 
@@ -196,7 +196,7 @@ pub(crate) struct SampleCodec;
 impl Codec for SampleCodec {
     type Protocol = StreamProtocol;
     type Request = SampleId;
-    type Response = Sample;
+    type Response = RawSample;
 
     async fn read_request<T>(
         &mut self,

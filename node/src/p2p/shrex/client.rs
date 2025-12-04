@@ -1,16 +1,11 @@
 use std::collections::HashMap;
 
-use celestia_proto::shwap::{Row as RawRow, Share as RawShare};
+use celestia_proto::shwap::{Row as RawRow, Sample as RawSample};
 use celestia_types::row::{Row, RowId};
 use celestia_types::sample::{Sample, SampleId};
 use libp2p::PeerId;
-use libp2p::request_response::{OutboundFailure, OutboundRequestId};
+use libp2p::request_response::{self, OutboundFailure, OutboundRequestId};
 use tokio::sync::oneshot;
-
-pub(super) struct Client {
-    row_reqs: HashMap<OutboundRequestId, RowReq>,
-    sample_reqs: HashMap<OutboundRequestId, SampleReq>,
-}
 
 struct RowReq {
     id: RowId,
@@ -22,28 +17,95 @@ struct SampleReq {
     respond_to: oneshot::Sender<Sample>,
 }
 
-impl Client {
-    pub(super) fn new() -> Client {
-        Client {
-            row_reqs: HashMap::new(),
-            sample_reqs: HashMap::new(),
+pub(super) trait ClientHandler {
+    type Request;
+    type Response;
+    type RawResponse;
+
+    fn send_request(&mut self, req: Self::Request, respond_to: oneshot::Sender<Self::Response>);
+
+    fn on_event(
+        &mut self,
+        ev: request_response::Event<Self::Request, Self::RawResponse>,
+    ) -> Option<request_response::Event<Self::Request, Self::RawResponse>> {
+        match ev {
+            // Received a response for an ongoing outbound request
+            request_response::Event::Message {
+                message:
+                    request_response::Message::Response {
+                        request_id,
+                        response,
+                    },
+                peer,
+                ..
+            } => {
+                self.on_response(peer, request_id, response);
+                None
+            }
+
+            // Failure while client requests
+            request_response::Event::OutboundFailure {
+                peer,
+                request_id,
+                error,
+                ..
+            } => {
+                self.on_outbound_failure(peer, request_id, error);
+                None
+            }
+
+            // Event could not be handled from here.
+            ev => Some(ev),
         }
     }
 
-    pub(super) fn on_row_request(&mut self, row_id: RowId, respond_to: oneshot::Sender<Row>) {
-        //
-    }
-
-    pub(super) fn on_row_response(
+    fn on_response(
         &mut self,
         peer_id: PeerId,
         request_id: OutboundRequestId,
-        raw_row: RawRow,
-    ) {
+        response: Self::RawResponse,
+    );
+
+    fn on_outbound_failure(
+        &mut self,
+        peer_id: PeerId,
+        request_id: OutboundRequestId,
+        error: OutboundFailure,
+    );
+}
+
+/*
+pub(super) struct Client<TReq, TResp, TRawResp> {
+    reqs: HashMap<OutboundRequestId, RowReq>,
+}
+*/
+
+pub(super) struct RowClient {
+    reqs: HashMap<OutboundRequestId, RowReq>,
+}
+
+impl RowClient {
+    pub(super) fn new() -> RowClient {
+        RowClient {
+            reqs: HashMap::new(),
+        }
+    }
+}
+
+impl ClientHandler for RowClient {
+    type Request = RowId;
+    type Response = Row;
+    type RawResponse = RawRow;
+
+    fn send_request(&mut self, req: RowId, respond_to: oneshot::Sender<Row>) {
         //
     }
 
-    pub(super) fn on_row_outbound_failure(
+    fn on_response(&mut self, peer_id: PeerId, request_id: OutboundRequestId, response: RawRow) {
+        //
+    }
+
+    fn on_outbound_failure(
         &mut self,
         peer_id: PeerId,
         request_id: OutboundRequestId,
@@ -51,25 +113,34 @@ impl Client {
     ) {
         //
     }
+}
 
-    pub(super) fn on_sample_request(
-        &mut self,
-        sample_id: SampleId,
-        respond_to: oneshot::Sender<Sample>,
-    ) {
+pub(super) struct SampleClient {
+    reqs: HashMap<OutboundRequestId, SampleReq>,
+}
+
+impl SampleClient {
+    pub(super) fn new() -> SampleClient {
+        SampleClient {
+            reqs: HashMap::new(),
+        }
+    }
+}
+
+impl ClientHandler for SampleClient {
+    type Request = SampleId;
+    type Response = Sample;
+    type RawResponse = RawSample;
+
+    fn send_request(&mut self, req: SampleId, respond_to: oneshot::Sender<Sample>) {
         //
     }
 
-    pub(super) fn on_sample_response(
-        &mut self,
-        peer_id: PeerId,
-        request_id: OutboundRequestId,
-        sample: Sample,
-    ) {
+    fn on_response(&mut self, peer_id: PeerId, request_id: OutboundRequestId, response: RawSample) {
         //
     }
 
-    pub(super) fn on_sample_outbound_failure(
+    fn on_outbound_failure(
         &mut self,
         peer_id: PeerId,
         request_id: OutboundRequestId,
