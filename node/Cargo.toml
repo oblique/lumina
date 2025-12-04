@@ -42,6 +42,7 @@ tendermint-proto.workspace = true
 tendermint.workspace = true
 
 async-trait.workspace = true
+bytes.workspace = true
 cid = { workspace = true, features = ["serde-codec"] }
 dashmap = "6"
 either = "1.12"

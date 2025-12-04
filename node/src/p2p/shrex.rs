@@ -5,31 +5,41 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use celestia_proto::shwap::{Row as RawRow, Share as RawShare};
 use celestia_types::row::{Row, RowId};
+use celestia_types::sample::{Sample, SampleId};
 use futures::AsyncWrite;
 use libp2p::core::Endpoint;
 use libp2p::core::transport::PortUse;
 use libp2p::identity::Keypair;
 use libp2p::request_response::{self, ProtocolSupport};
+use libp2p::request_response::{
+    InboundFailure, InboundRequestId, OutboundFailure, OutboundRequestId,
+};
 use libp2p::swarm::handler::ConnectionEvent;
 use libp2p::swarm::{
     ConnectionDenied, ConnectionHandler, ConnectionHandlerEvent, ConnectionId, FromSwarm,
     NetworkBehaviour, SubstreamProtocol, THandlerInEvent, THandlerOutEvent, ToSwarm,
 };
 use libp2p::{Multiaddr, PeerId, gossipsub};
+use tokio::sync::oneshot;
 
 mod client;
 mod codec;
 
 use self::client::Client;
-use self::codec::RowCodec;
+use self::codec::{ReqRespCodec, RowCodec, SampleCodec};
 
 use crate::p2p::P2pError;
 use crate::store::Store;
 use crate::utils::protocol_id;
 
-type RowReqRespEvent = request_response::Event<RowId, Row>;
-type RowReqRespMessage = request_response::Message<RowId, Row>;
+type RowReqRespEvent = request_response::Event<RowId, RawRow>;
+type RowReqRespMessage = request_response::Message<RowId, RawRow>;
+type SampleReqRespEvent = request_response::Event<SampleId, Sample>;
+type SampleReqRespMessage = request_response::Message<SampleId, Sample>;
+
+type ReqRespBehaviour<TReq, TResp> = request_response::Behaviour<ReqRespCodec<TReq, TResp>>;
 
 pub(crate) struct Config<'a, S> {
     pub network_id: &'a str,
@@ -42,7 +52,7 @@ where
     S: Store + 'static,
 {
     inner: Inner,
-    _client: Client,
+    client: Client,
     _da_pools: HashMap<u64, HashSet<PeerId>>,
     _store: Arc<S>,
 }
@@ -58,7 +68,8 @@ pub(crate) struct Inner {
     // we cannot be isolated in a way described in a shrex-sub spec:
     // https://github.com/celestiaorg/celestia-node/blob/76db37cc4ac09e892122a081b8bea24f87899f11/specs/src/shrex/shrex-sub.md#why-not-gossipsub
     shrex_sub: gossipsub::Behaviour,
-    row_req_resp: request_response::Behaviour<RowCodec>,
+    //row_req_resp: request_response::Behaviour<RowCodec>,
+    row_req_resp: ReqRespBehaviour<RowId, RawRow>,
     sample_req_resp: request_response::Behaviour<SampleCodec>,
 }
 
@@ -102,7 +113,7 @@ where
                 row_req_resp: request_response::Behaviour::new(
                     [(
                         protocol_id(config.network_id, "/shrex/v0.1.0/row_v0"),
-                        ProtocolSupport::Full,
+                        ProtocolSupport::Outbound,
                     )],
                     request_response::Config::default(),
                 ),
@@ -114,7 +125,7 @@ where
                     request_response::Config::default(),
                 ),
             },
-            _client: Client::new(),
+            client: Client::new(),
             _da_pools: HashMap::new(),
             _store: config.header_store,
         })
@@ -141,8 +152,9 @@ where
         }
     }
 
-    pub(crate) fn get_row(&mut self, height: u64, index: u16) {
-        //
+    pub(crate) fn get_row(&mut self, height: u64, index: u16, respond_to: oneshot::Sender<Row>) {
+        let row_id = RowId::new(index, height).expect("todo");
+        self.client.on_row_request(row_id, respond_to);
     }
 
     fn on_row_req_resp_event(&mut self, ev: RowReqRespEvent) {
@@ -157,7 +169,7 @@ where
                 peer,
                 ..
             } => {
-                todo!();
+                self.client.on_row_response(peer, request_id, response);
             }
 
             // Failure while client requests
@@ -167,71 +179,56 @@ where
                 error,
                 ..
             } => {
-                todo!();
+                self.client.on_row_outbound_failure(peer, request_id, error);
             }
 
-            // Received new inbound request
-            RowReqRespEvent::Message {
-                message:
-                    RowReqRespMessage::Request {
-                        request_id,
-                        request,
-                        channel,
-                    },
-                peer,
-                ..
-            } => {
-                todo!();
-            }
-
-            // Response to inbound request was sent
-            RowReqRespEvent::ResponseSent {
-                peer, request_id, ..
-            } => {
-                todo!();
-            }
-
-            // Failure while server responds
-            RowReqRespEvent::InboundFailure {
-                peer,
-                request_id,
-                error,
-                ..
-            } => {
-                todo!();
+            _ => {
+                unreachable!("Server side for ShrEx Row endpoint is unsupported");
             }
         }
+    }
+
+    pub(crate) fn get_sample(
+        &mut self,
+        height: u64,
+        row_index: u16,
+        column_index: u16,
+        respond_to: oneshot::Sender<Sample>,
+    ) {
+        let sample_id = SampleId::new(row_index, column_index, height).expect("todo");
+        self.client.on_sample_request(sample_id, respond_to);
     }
 
     fn on_sample_req_resp_event(&mut self, ev: SampleReqRespEvent) {
         match ev {
             // Received a response for an ongoing outbound request
-            RowReqRespEvent::Message {
+            SampleReqRespEvent::Message {
                 message:
-                    RowReqRespMessage::Response {
+                    SampleReqRespMessage::Response {
                         request_id,
                         response,
                     },
                 peer,
                 ..
             } => {
-                todo!();
+                self.client.on_sample_response(peer, request_id, response);
             }
 
             // Failure while client requests
-            RowReqRespEvent::OutboundFailure {
+            SampleReqRespEvent::OutboundFailure {
                 peer,
                 request_id,
                 error,
                 ..
             } => {
-                todo!();
+                self.client
+                    .on_sample_outbound_failure(peer, request_id, error);
             }
 
             // Received new inbound request
-            RowReqRespEvent::Message {
+            SampleReqRespEvent::Message {
                 message:
-                    RowReqRespMessage::Request {
+                    SampleReqRespMessage::Request {
                         request_id,
                         request,
                         channel,
@@ -239,24 +236,24 @@ where
                 peer,
                 ..
             } => {
-                todo!();
+                todo!("server");
             }
 
             // Response to inbound request was sent
-            RowReqRespEvent::ResponseSent {
+            SampleReqRespEvent::ResponseSent {
                 peer, request_id, ..
             } => {
-                todo!();
+                todo!("server");
             }
 
             // Failure while server responds
-            RowReqRespEvent::InboundFailure {
+            SampleReqRespEvent::InboundFailure {
                 peer,
                 request_id,
                 error,
                 ..
             } => {
-                todo!();
+                todo!("server");
             }
         }
     }

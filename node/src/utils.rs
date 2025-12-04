@@ -168,3 +168,17 @@ where
 
     Ok(buf)
 }
+
+pub(crate) fn try_read_byte<T>(io: &mut T) -> Option<u8>
+where
+    T: AsyncRead + Unpin + Send,
+{
+    let mut buf = [0u8; 1];
+
+    match io.read(&mut buf[..]).now_or_never()? {
+        Ok(0) => None,
+        Ok(1) => Some(buf[1]),
+        Ok(_) => unreachable!("we only read one byte"),
+        Err(_) => None,
+    }
+}
