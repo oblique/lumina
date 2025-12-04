@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use celestia_proto::shwap::{Row as RawRow, Share as RawShare};
+use celestia_proto::shwap::{Row as RawRow, Sample as RawSample};
 use celestia_types::row::{Row, RowId};
 use celestia_types::sample::{Sample, SampleId};
 use futures::AsyncWrite;
@@ -27,7 +27,7 @@ use tokio::sync::oneshot;
 mod client;
 mod codec;
 
-use self::client::{ClientHandler, RowClient, SampleClient};
+use self::client::{Client, ClientHandler};
 use self::codec::{ReqRespCodec, RowCodec, SampleCodec};
 
 use crate::p2p::P2pError;
@@ -52,8 +52,8 @@ where
     S: Store + 'static,
 {
     inner: Inner,
-    row_client: RowClient,
-    sample_client: SampleClient,
+    row_client: Client<RowId, Row, RawRow>,
+    sample_client: Client<SampleId, Sample, RawSample>,
     _da_pools: HashMap<u64, HashSet<PeerId>>,
     _store: Arc<S>,
 }
@@ -126,8 +126,8 @@ where
                     request_response::Config::default(),
                 ),
             },
-            row_client: RowClient::new(),
-            sample_client: SampleClient::new(),
+            row_client: Client::new(),
+            sample_client: Client::new(),
             _da_pools: HashMap::new(),
             _store: config.header_store,
         })
