@@ -52,6 +52,7 @@ mod shrex;
 pub(crate) mod shwap;
 mod swarm;
 mod swarm_manager;
+mod utils;
 
 use crate::block_ranges::BlockRange;
 use crate::events::EventPublisher;
@@ -67,6 +68,7 @@ use crate::utils::{
 };
 
 pub use crate::p2p::header_ex::HeaderExError;
+pub use crate::p2p::shrex::ShrExError;
 
 // Maximum size of a [`Multihash`].
 pub(crate) const MAX_MH_SIZE: usize = 64;
@@ -103,6 +105,10 @@ pub enum P2pError {
     /// An error propagated from the `header-ex`.
     #[error("HeaderEx: {0}")]
     HeaderEx(#[from] HeaderExError),
+
+    /// An error propagated from the `shr-ex`.
+    #[error("ShrEx: {0}")]
+    ShrEx(#[from] ShrExError),
 
     /// Bootnode address is missing its peer ID.
     #[error("Bootnode multiaddrs without peer ID: {0:?}")]
@@ -158,6 +164,7 @@ impl P2pError {
             | P2pError::ChannelClosedUnexpectedly
             | P2pError::BootnodeAddrsWithoutPeerId(_) => true,
             P2pError::HeaderEx(_)
+            | P2pError::ShrEx(_)
             | P2pError::Bitswap(_)
             | P2pError::ProtoDecodeFailed(_)
             | P2pError::Cid(_)

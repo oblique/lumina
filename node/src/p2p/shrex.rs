@@ -22,6 +22,7 @@ use libp2p::swarm::{
     NetworkBehaviour, SubstreamProtocol, THandlerInEvent, THandlerOutEvent, ToSwarm,
 };
 use libp2p::{Multiaddr, PeerId, gossipsub};
+use thiserror::Error;
 use tokio::sync::oneshot;
 
 mod client;
@@ -74,6 +75,19 @@ pub(crate) struct Inner {
 
 #[derive(Debug)]
 pub(crate) enum Event {}
+
+#[derive(Debug, Error)]
+pub enum ShrExError {
+    /// Error when handling connection to the client.
+    #[error("Outbound failure: {0}")]
+    OutboundFailure(OutboundFailure),
+
+    /// Request cancelled because [`Node`] is stopping.
+    ///
+    /// [`Node`]: crate::node::Node
+    #[error("Request cancelled because `Node` is stopping")]
+    RequestCancelled,
+}
 
 impl<S> Behaviour<S>
 where
@@ -151,7 +165,12 @@ where
         }
     }
 
-    pub(crate) fn get_row(&mut self, height: u64, index: u16, respond_to: oneshot::Sender<Row>) {
+    pub(crate) fn get_row(
+        &mut self,
+        height: u64,
+        index: u16,
+        respond_to: oneshot::Sender<Result<Row, P2pError>>,
+    ) {
         let row_id = RowId::new(index, height).expect("todo");
         self.client.row.send_request(row_id, respond_to);
     }
@@ -161,7 +180,7 @@ where
         height: u64,
         row_index: u16,
         column_index: u16,
-        respond_to: oneshot::Sender<Sample>,
+        respond_to: oneshot::Sender<Result<Sample, P2pError>>,
     ) {
         let sample_id = SampleId::new(row_index, column_index, height).expect("todo");
         self.client.sample.send_request(sample_id, respond_to);

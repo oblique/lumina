@@ -8,9 +8,13 @@ use celestia_types::row::{Row, RowId};
 use celestia_types::sample::{Sample, SampleId};
 use libp2p::PeerId;
 use libp2p::request_response::{self, Codec, OutboundFailure, OutboundRequestId};
+use thiserror::Error;
 use tokio::sync::oneshot;
 
+use crate::p2p::P2pError;
+use crate::p2p::shrex::ShrExError;
 use crate::p2p::shrex::codec::{ByteCodec, ReqRespCodec};
+use crate::p2p::utils::OneshotSender;
 use crate::peer_tracker::PeerTracker;
 
 pub(super) struct Client {
@@ -33,7 +37,7 @@ impl Client {
 
 struct State<TReq, TResp> {
     req: TReq,
-    respond_to: oneshot::Sender<TResp>,
+    respond_to: OneshotSender<TResp>,
 }
 
 pub(super) struct ClientEndpoint<TReq, TResp, TRawResp>
@@ -68,12 +72,25 @@ where
     type TResp = TResp;
     type TRawResp = TRawResp;
 
-    fn send_request(&mut self, req: TReq, respond_to: oneshot::Sender<TResp>) {
-        //
+    fn send_request(&mut self, req: TReq, respond_to: oneshot::Sender<Result<TResp, P2pError>>) {
+        self.pending_reqs.push_back(State {
+            req,
+            respond_to: OneshotSender::new(respond_to, ShrExError::RequestCancelled),
+        });
     }
 
-    fn on_response(&mut self, peer_id: PeerId, request_id: OutboundRequestId, response: TRawResp) {
-        //
+    fn on_response(
+        &mut self,
+        peer_id: PeerId,
+        request_id: OutboundRequestId,
+        raw_response: TRawResp,
+    ) {
+        let Some(mut state) = self.reqs.remove(&request_id) else {
+            return;
+        };
+
+        let resp = TResp::from_raw_response(state.req, raw_response);
+        state.respond_to.maybe_send_ok(resp);
     }
 
     fn on_outbound_failure(
@@ -82,7 +99,13 @@ where
         request_id: OutboundRequestId,
         error: OutboundFailure,
     ) {
-        //
+        let Some(mut state) = self.reqs.remove(&request_id) else {
+            return;
+        };
+
+        state
+            .respond_to
+            .maybe_send_err(ShrExError::OutboundFailure(error));
     }
 
     fn has_pending_requests(&self) -> bool {
@@ -97,7 +120,7 @@ where
         if self.pending_reqs.is_empty() {
             return;
         }
-        //
+        // TODO
     }
 }
 
@@ -105,8 +128,6 @@ pub(super) trait ClientEndpointHandler {
     type TReq: ByteCodec;
     type TResp;
     type TRawResp: ByteCodec;
-
-    fn send_request(&mut self, req: Self::TReq, respond_to: oneshot::Sender<Self::TResp>);
 
     fn on_event(
         &mut self,
@@ -142,6 +163,12 @@ pub(super) trait ClientEndpointHandler {
             ev => Some(ev),
         }
     }
+
+    fn send_request(
+        &mut self,
+        req: Self::TReq,
+        respond_to: oneshot::Sender<Result<Self::TResp, P2pError>>,
+    );
 
     fn on_response(
         &mut self,
