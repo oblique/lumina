@@ -27,7 +27,7 @@ use tokio::sync::oneshot;
 mod client;
 mod codec;
 
-use self::client::{Client, ClientHandler};
+use self::client::{Client, ClientEndpointHandler};
 use self::codec::{ReqRespCodec, RowCodec, SampleCodec};
 
 use crate::p2p::P2pError;
@@ -52,8 +52,7 @@ where
     S: Store + 'static,
 {
     inner: Inner,
-    row_client: Client<RowId, Row, RawRow>,
-    sample_client: Client<SampleId, Sample, RawSample>,
+    client: Client,
     _da_pools: HashMap<u64, HashSet<PeerId>>,
     _store: Arc<S>,
 }
@@ -69,9 +68,8 @@ pub(crate) struct Inner {
     // we cannot be isolated in a way described in a shrex-sub spec:
     // https://github.com/celestiaorg/celestia-node/blob/76db37cc4ac09e892122a081b8bea24f87899f11/specs/src/shrex/shrex-sub.md#why-not-gossipsub
     shrex_sub: gossipsub::Behaviour,
-    //row_req_resp: request_response::Behaviour<RowCodec>,
-    row_req_resp: ReqRespBehaviour<RowId, RawRow>,
-    sample_req_resp: request_response::Behaviour<SampleCodec>,
+    row_req_resp: request_response::Behaviour<ReqRespCodec<RowId, RawRow>>,
+    sample_req_resp: request_response::Behaviour<ReqRespCodec<SampleId, RawSample>>,
 }
 
 #[derive(Debug)]
@@ -126,8 +124,7 @@ where
                     request_response::Config::default(),
                 ),
             },
-            row_client: Client::new(),
-            sample_client: Client::new(),
+            client: Client::new(),
             _da_pools: HashMap::new(),
             _store: config.header_store,
         })
@@ -143,11 +140,11 @@ where
                 None
             }
             ToSwarm::GenerateEvent(InnerEvent::RowReqResp(ev)) => {
-                self.row_client.on_event(ev);
+                self.client.row.on_event(ev);
                 None
             }
             ToSwarm::GenerateEvent(InnerEvent::SampleReqResp(ev)) => {
-                self.sample_client.on_event(ev);
+                self.client.sample.on_event(ev);
                 None
             }
             _ => Some(ev.map_out(|_| unreachable!("GenerateEvent handled"))),
@@ -156,7 +153,7 @@ where
 
     pub(crate) fn get_row(&mut self, height: u64, index: u16, respond_to: oneshot::Sender<Row>) {
         let row_id = RowId::new(index, height).expect("todo");
-        self.row_client.send_request(row_id, respond_to);
+        self.client.row.send_request(row_id, respond_to);
     }
 
     pub(crate) fn get_sample(
@@ -167,7 +164,7 @@ where
         respond_to: oneshot::Sender<Sample>,
     ) {
         let sample_id = SampleId::new(row_index, column_index, height).expect("todo");
-        self.sample_client.send_request(sample_id, respond_to);
+        self.client.sample.send_request(sample_id, respond_to);
     }
 }
 

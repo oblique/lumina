@@ -57,10 +57,51 @@ impl ByteCodec for RawRow {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+impl ByteCodec for SampleId {
+    const MAX_SIZE: usize = 0;
+    const TIMEOUT: Duration = Duration::from_secs(1);
+
+    fn encode(&self) -> Vec<u8> {
+        todo!();
+    }
+
+    fn decode(data: &[u8]) -> io::Result<Self>
+    where
+        Self: Sized,
+    {
+        todo!();
+    }
+}
+
+impl ByteCodec for RawSample {
+    const MAX_SIZE: usize = 0;
+    const TIMEOUT: Duration = Duration::from_secs(1);
+
+    fn encode(&self) -> Vec<u8> {
+        todo!();
+    }
+
+    fn decode(data: &[u8]) -> io::Result<Self>
+    where
+        Self: Sized,
+    {
+        todo!();
+    }
+}
+
+#[derive(Debug)]
 pub(crate) struct ReqRespCodec<TReq, TResp> {
     _phantom_req: PhantomData<TReq>,
     _phantom_resp: PhantomData<TResp>,
+}
+
+impl<TReq, TResp> Clone for ReqRespCodec<TReq, TResp> {
+    fn clone(&self) -> Self {
+        ReqRespCodec {
+            _phantom_req: PhantomData,
+            _phantom_resp: PhantomData,
+        }
+    }
 }
 
 impl<TReq, TResp> Default for ReqRespCodec<TReq, TResp> {
