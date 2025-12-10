@@ -268,6 +268,12 @@ pub(crate) enum P2pCmd {
     GetNetworkHead {
         respond_to: oneshot::Sender<Option<ExtendedHeader>>,
     },
+    GetSample {
+        row_index: u16,
+        column_index: u16,
+        block_height: u64,
+        respond_to: OneshotResultSender<Sample, P2pError>,
+    },
 }
 
 impl P2p {
@@ -548,12 +554,26 @@ impl P2p {
         block_height: u64,
         timeout: Option<Duration>,
     ) -> Result<Sample> {
+        let (tx, rx) = oneshot::channel();
+
+        self.send_command(P2pCmd::GetSample {
+            row_index,
+            column_index,
+            block_height,
+            respond_to: tx,
+        })
+        .await?;
+
+        rx.await?
+
+        /*
         let id = SampleId::new(row_index, column_index, block_height).map_err(P2pError::Cid)?;
         let cid = convert_cid(&id.into())?;
 
         let data = self.get_shwap_cid(cid, timeout).await?;
         let sample = Sample::decode(id, &data[..]).map_err(|e| P2pError::Shwap(e.to_string()))?;
         Ok(sample)
+        */
     }
 
     /// Request a [`RowNamespaceData`] on bitswap protocol.
@@ -859,9 +879,7 @@ where
             BehaviourEvent::Gossipsub(ev) => self.on_gossip_sub_event(ev).await,
             BehaviourEvent::Bitswap(ev) => self.on_bitswap_event(ev).await,
             BehaviourEvent::HeaderEx(ev) => self.on_header_ex_event(ev).await,
-            BehaviourEvent::ShrEx(_ev) => {
-                // todo: event for adding peers to peer tracker
-            }
+            BehaviourEvent::ShrEx(ev) => self.on_shrex_event(ev).await,
         }
 
         Ok(())
@@ -926,6 +944,19 @@ where
                     .as_ref()
                     .map(|state| state.known_head.clone());
                 respond_to.maybe_send(head);
+            }
+            P2pCmd::GetSample {
+                row_index,
+                column_index,
+                block_height,
+                respond_to,
+            } => {
+                self.swarm.context().behaviour.shr_ex.get_sample(
+                    block_height,
+                    row_index,
+                    column_index,
+                    respond_to,
+                );
             }
         }
 
@@ -1020,6 +1051,19 @@ where
             }
             header_ex::Event::NeedArchivalPeers => {
                 self.swarm.start_archival_node_kad_query();
+            }
+        }
+    }
+
+    #[instrument(level = "trace", skip(self))]
+    async fn on_shrex_event(&mut self, ev: shrex::Event) {
+        match ev {
+            shrex::Event::SchedulePendingRequests => {
+                let ctx = self.swarm.context();
+
+                ctx.behaviour
+                    .shr_ex
+                    .schedule_pending_requests(ctx.peer_tracker);
             }
         }
     }

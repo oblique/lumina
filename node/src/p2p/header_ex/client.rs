@@ -225,7 +225,7 @@ where
                     peer.is_connected() && peer.is_trusted() && peer.is_archival()
                 }
             })
-            .collect::<SmallVec<[_; MAX_PEERS]>>();
+            .collect::<Vec<_>>();
 
         if !peers.is_empty() {
             // TODO: We can add a parameter for what kind of sorting we want for the peers.

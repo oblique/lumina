@@ -552,7 +552,7 @@ where
 
     #[instrument(level = "trace", skip(self))]
     fn on_identify_event(&mut self, ev: identify::Event) {
-        match ev {
+        match dbg!(ev) {
             identify::Event::Received { peer_id, info, .. } => {
                 self.peer_tracker
                     .on_agent_version(&peer_id, &info.agent_version);

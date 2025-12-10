@@ -7,7 +7,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use bytes::BytesMut;
 use celestia_proto::shwap::{Row as RawRow, Sample as RawSample};
-use celestia_types::row::{ROW_ID_SIZE, Row, RowId};
+use celestia_types::eds::RawExtendedDataSquare;
+use celestia_types::row::{EDS_ID_SIZE, EdsId, ROW_ID_SIZE, Row, RowId};
 use celestia_types::sample::{Sample, SampleId};
 use futures::{AsyncRead, AsyncWrite};
 use libp2p::StreamProtocol;
@@ -24,6 +25,21 @@ pub(super) trait ByteCodec: Send {
     fn decode(data: &[u8]) -> io::Result<Self>
     where
         Self: Sized;
+}
+
+impl ByteCodec for EdsId {
+    const MAX_SIZE: usize = EDS_ID_SIZE;
+    const TIMEOUT: Duration = Duration::from_secs(1);
+
+    fn encode(&self) -> Vec<u8> {
+        let mut bytes = BytesMut::new();
+        self.encode(&mut bytes);
+        bytes.into()
+    }
+
+    fn decode(data: &[u8]) -> io::Result<EdsId> {
+        EdsId::decode(data).map_err(io::Error::other)
+    }
 }
 
 impl ByteCodec for RowId {
@@ -114,7 +130,7 @@ impl<TReq, TResp> Default for ReqRespCodec<TReq, TResp> {
 }
 
 #[async_trait]
-impl<TReq, TResp> Codec for ReqRespCodec<TReq, TResp>
+impl<TReq> Codec for ReqRespCodec<TReq>
 where
     TReq: ByteCodec + Send,
     TResp: ByteCodec + Send,

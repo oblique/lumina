@@ -32,6 +32,7 @@ use self::client::{Client, ClientEndpointHandler};
 use self::codec::{ReqRespCodec, RowCodec, SampleCodec};
 
 use crate::p2p::P2pError;
+use crate::peer_tracker::PeerTracker;
 use crate::store::Store;
 use crate::utils::protocol_id;
 
@@ -52,14 +53,14 @@ pub(crate) struct Behaviour<S>
 where
     S: Store + 'static,
 {
-    inner: Inner,
+    inner: InnerBehaviour,
     client: Client,
     _da_pools: HashMap<u64, HashSet<PeerId>>,
     _store: Arc<S>,
 }
 
 #[derive(NetworkBehaviour)]
-pub(crate) struct Inner {
+pub(crate) struct InnerBehaviour {
     // TODO: this is a workaround, should be replaced with a real floodsub
     // rust-libp2p implementation of the floodsub isn't compliant with a spec,
     // so we work that around by using a gossipsub configured with floodsub support.
@@ -74,7 +75,9 @@ pub(crate) struct Inner {
 }
 
 #[derive(Debug)]
-pub(crate) enum Event {}
+pub(crate) enum Event {
+    SchedulePendingRequests,
+}
 
 #[derive(Debug, Error)]
 pub enum ShrExError {
@@ -120,8 +123,13 @@ where
             .subscribe(&gossipsub::IdentTopic::new(topic))
             .map_err(|e| P2pError::GossipsubInit(e.to_string()))?;
 
+        /*
+        let x = format!("{}/shrex/v0.1.0/sample_v0", config.network_id);
+        let x = libp2p::StreamProtocol::try_from_owned(x).expect("does not start from '/'");
+        */
+
         Ok(Self {
-            inner: Inner {
+            inner: InnerBehaviour {
                 shrex_sub,
                 row_req_resp: request_response::Behaviour::new(
                     [(
@@ -132,7 +140,7 @@ where
                 ),
                 sample_req_resp: request_response::Behaviour::new(
                     [(
-                        protocol_id(config.network_id, "/shrex/v0.1.0/sample_v0"),
+                        dbg!(protocol_id(config.network_id, "/shrex/v0.1.0/sample_v0")),
                         ProtocolSupport::Full,
                     )],
                     request_response::Config::default(),
@@ -146,23 +154,32 @@ where
 
     fn on_to_swarm(
         &mut self,
-        ev: ToSwarm<InnerEvent, THandlerInEvent<Inner>>,
+        ev: ToSwarm<InnerBehaviourEvent, THandlerInEvent<InnerBehaviour>>,
     ) -> Option<ToSwarm<Event, THandlerInEvent<Self>>> {
         match ev {
-            ToSwarm::GenerateEvent(InnerEvent::ShrexSub(ev)) => {
+            ToSwarm::GenerateEvent(InnerBehaviourEvent::ShrexSub(ev)) => {
                 // TODO: Handle shrex sub events and do not propagate them
                 None
             }
-            ToSwarm::GenerateEvent(InnerEvent::RowReqResp(ev)) => {
+            ToSwarm::GenerateEvent(InnerBehaviourEvent::RowReqResp(ev)) => {
                 self.client.row.on_event(ev);
                 None
             }
-            ToSwarm::GenerateEvent(InnerEvent::SampleReqResp(ev)) => {
+            ToSwarm::GenerateEvent(InnerBehaviourEvent::SampleReqResp(ev)) => {
                 self.client.sample.on_event(ev);
                 None
             }
             _ => Some(ev.map_out(|_| unreachable!("GenerateEvent handled"))),
         }
+    }
+
+    pub(crate) fn on_stop(&mut self) {
+        self.client.on_stop();
+    }
+
+    pub(crate) fn schedule_pending_requests(&mut self, peer_tracker: &PeerTracker) {
+        self.client
+            .schedule_pending_requests(&mut self.inner, peer_tracker);
     }
 
     pub(crate) fn get_row(
@@ -275,11 +292,15 @@ where
             return Poll::Ready(ev);
         }
 
+        if let Poll::Ready(ev) = self.client.poll(cx) {
+            return Poll::Ready(ToSwarm::GenerateEvent(ev));
+        }
+
         Poll::Pending
     }
 }
 
-type InnerConnectionHandler = <Inner as NetworkBehaviour>::ConnectionHandler;
+type InnerConnectionHandler = <InnerBehaviour as NetworkBehaviour>::ConnectionHandler;
 
 pub(crate) struct ConnHandler(InnerConnectionHandler);
 
