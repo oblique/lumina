@@ -389,7 +389,7 @@ impl Codec for HeaderCodec {
     where
         T: AsyncRead + Unpin + Send,
     {
-        let data = read_up_to(io, REQUEST_SIZE_LIMIT, REQUEST_TIME_LIMIT).await?;
+        let (data, _) = read_up_to(io, REQUEST_SIZE_LIMIT, REQUEST_TIME_LIMIT).await?;
 
         if data.len() >= REQUEST_SIZE_LIMIT {
             debug!("Message filled the whole buffer (len: {})", data.len());
@@ -412,7 +412,7 @@ impl Codec for HeaderCodec {
     where
         T: AsyncRead + Unpin + Send,
     {
-        let data = read_up_to(io, RESPONSE_SIZE_LIMIT, RESPONSE_TIME_LIMIT).await?;
+        let (data, _) = read_up_to(io, RESPONSE_SIZE_LIMIT, RESPONSE_TIME_LIMIT).await?;
 
         if data.len() >= RESPONSE_SIZE_LIMIT {
             debug!("Message filled the whole buffer (len: {})", data.len());

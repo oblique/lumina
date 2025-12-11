@@ -27,21 +27,15 @@ use tokio::sync::oneshot;
 
 mod client;
 mod codec;
+mod req_resp;
 
 use self::client::{Client, ClientEndpointHandler};
-use self::codec::{ReqRespCodec, RowCodec, SampleCodec};
+use self::req_resp::ShrexBytesCodec;
 
 use crate::p2p::P2pError;
 use crate::peer_tracker::PeerTracker;
 use crate::store::Store;
 use crate::utils::protocol_id;
-
-type RowReqRespEvent = request_response::Event<RowId, RawRow>;
-type RowReqRespMessage = request_response::Message<RowId, RawRow>;
-type SampleReqRespEvent = request_response::Event<SampleId, Sample>;
-type SampleReqRespMessage = request_response::Message<SampleId, Sample>;
-
-type ReqRespBehaviour<TReq, TResp> = request_response::Behaviour<ReqRespCodec<TReq, TResp>>;
 
 pub(crate) struct Config<'a, S> {
     pub network_id: &'a str,
@@ -70,8 +64,8 @@ pub(crate) struct InnerBehaviour {
     // we cannot be isolated in a way described in a shrex-sub spec:
     // https://github.com/celestiaorg/celestia-node/blob/76db37cc4ac09e892122a081b8bea24f87899f11/specs/src/shrex/shrex-sub.md#why-not-gossipsub
     shrex_sub: gossipsub::Behaviour,
-    row_req_resp: request_response::Behaviour<ReqRespCodec<RowId, RawRow>>,
-    sample_req_resp: request_response::Behaviour<ReqRespCodec<SampleId, RawSample>>,
+    row_req_resp: request_response::Behaviour<ShrexBytesCodec>,
+    sample_req_resp: request_response::Behaviour<ShrexBytesCodec>,
 }
 
 #[derive(Debug)]

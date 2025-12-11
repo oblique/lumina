@@ -128,16 +128,20 @@ impl TimeExt for Time {
 }
 
 /// Reads up to `size_limit` within `time_limit`.
+///
+/// It returns a vector of bytes that were read and a boolean which indicates
+/// that time limit was reached.
 pub(crate) async fn read_up_to<T>(
     io: &mut T,
     size_limit: usize,
     time_limit: Duration,
-) -> io::Result<Vec<u8>>
+) -> io::Result<(Vec<u8>, bool)>
 where
     T: AsyncRead + Unpin + Send,
 {
     let mut buf = vec![0u8; size_limit];
     let mut read_len = 0;
+    let mut time_limit_reached = false;
     let now = Instant::now();
 
     loop {
@@ -153,7 +157,10 @@ where
         let len = match timeout(time_limit, io.read(&mut buf[read_len..])).await {
             Ok(Ok(len)) => len,
             Ok(Err(e)) => return Err(e),
-            Err(_) => break,
+            Err(_) => {
+                time_limit_reached = true;
+                break;
+            }
         };
 
         if len == 0 {
@@ -166,7 +173,7 @@ where
 
     buf.truncate(read_len);
 
-    Ok(buf)
+    Ok((buf, time_limit_reached))
 }
 
 /*
