@@ -37,6 +37,8 @@ use crate::peer_tracker::PeerTracker;
 use crate::store::Store;
 use crate::utils::protocol_id;
 
+pub(crate) type Result<T, E = ShrExError> = std::result::Result<T, E>;
+
 pub(crate) struct Config<'a, S> {
     pub network_id: &'a str,
     pub local_keypair: &'a Keypair,
@@ -84,6 +86,12 @@ pub enum ShrExError {
     /// [`Node`]: crate::node::Node
     #[error("Request cancelled because `Node` is stopping")]
     RequestCancelled,
+
+    #[error("Invalid request")]
+    InvalidRequest,
+
+    #[error("Invalid response")]
+    InvalidResponse,
 }
 
 impl<S> Behaviour<S>

@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 use crate::p2p::P2pError;
 use crate::p2p::shrex::codec::{RequestCodec, ResponseCodec};
 use crate::p2p::shrex::req_resp::{Response, ShrexBytesCodec};
-use crate::p2p::shrex::{Event, InnerBehaviour, ShrExError};
+use crate::p2p::shrex::{Event, InnerBehaviour, Result, ShrExError};
 use crate::p2p::utils::OneshotSender;
 use crate::peer_tracker::PeerTracker;
 
@@ -88,7 +88,7 @@ struct State<TReq, TResp> {
 pub(super) struct ClientEndpoint<TReq, TResp>
 where
     TReq: RequestCodec + Clone,
-    TResp: ResponseCodec,
+    TResp: ResponseCodec<Request = TReq>,
 {
     cancellation_token: CancellationToken,
     reqs: HashMap<OutboundRequestId, State<TReq, TResp>>,
@@ -98,7 +98,7 @@ where
 impl<TReq, TResp> ClientEndpoint<TReq, TResp>
 where
     TReq: RequestCodec + Clone,
-    TResp: ResponseCodec,
+    TResp: ResponseCodec<Request = TReq>,
 {
     pub(super) fn new() -> Self {
         Self {
@@ -112,13 +112,12 @@ where
 impl<TReq, TResp> ClientEndpointHandler for ClientEndpoint<TReq, TResp>
 where
     TReq: RequestCodec + Clone,
-    TResp: ResponseCodec,
+    TResp: ResponseCodec<Request = TReq>,
 {
     type TReq = TReq;
     type TResp = TResp;
 
     fn send_request(&mut self, req: TReq, respond_to: oneshot::Sender<Result<TResp, P2pError>>) {
-        /*
         let respond_to = OneshotSender::new(respond_to, ShrExError::RequestCancelled);
 
         if self.cancellation_token.is_cancelled() {
@@ -126,18 +125,20 @@ where
         }
 
         self.pending_reqs.push_back(State { req, respond_to });
-        */
     }
 
     fn on_response(&mut self, peer_id: PeerId, request_id: OutboundRequestId, response: Response) {
-        /*
         let Some(mut state) = self.reqs.remove(&request_id) else {
             return;
         };
 
-        let resp = TResp::from_raw_response(state.req, raw_response);
-        state.respond_to.maybe_send_ok(resp);
-        */
+        match response {
+            Response::Ok(raw_data) => {
+                let resp = TResp::decode_and_verify(&raw_data, &state.req, todo!()).expect("todo");
+                state.respond_to.maybe_send_ok(resp);
+            }
+            _ => todo!(),
+        }
     }
 
     fn on_outbound_failure(
@@ -146,7 +147,6 @@ where
         request_id: OutboundRequestId,
         error: OutboundFailure,
     ) {
-        /*
         let Some(mut state) = self.reqs.remove(&request_id) else {
             return;
         };
@@ -154,7 +154,6 @@ where
         state
             .respond_to
             .maybe_send_err(ShrExError::OutboundFailure(error));
-        */
     }
 
     fn on_stop(&mut self) {
@@ -172,7 +171,6 @@ where
         sender: &mut request_response::Behaviour<ShrexBytesCodec>,
         peer_tracker: &PeerTracker,
     ) {
-        /*
         if self.pending_reqs.is_empty() {
             return;
         }
@@ -198,11 +196,10 @@ where
             {
                 // Choose different peer for each request
                 let peer = peers[i % peers.len()];
-                let req_id = sender.send_request(peer.id(), state.req.clone());
+                let req_id = sender.send_request(peer.id(), state.req.encode());
                 self.reqs.insert(req_id, state);
             }
         }
-        */
     }
 }
 
