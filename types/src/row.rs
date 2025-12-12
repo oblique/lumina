@@ -17,29 +17,16 @@ use prost::Message;
 use serde::Serialize;
 
 use crate::consts::appconsts::SHARE_SIZE;
-use crate::eds::ExtendedDataSquare;
+use crate::eds::{EDS_ID_SIZE, EdsId, ExtendedDataSquare};
 use crate::nmt::{Nmt, NmtExt};
 use crate::{DataAvailabilityHeader, Error, Result, Share};
 
-/// Number of bytes needed to represent [`EdsId`] in `multihash`.
-pub const EDS_ID_SIZE: usize = 8;
 /// Number of bytes needed to represent [`RowId`] in `multihash`.
 pub const ROW_ID_SIZE: usize = EDS_ID_SIZE + 2;
 /// The code of the [`RowId`] hashing algorithm in `multihash`.
 pub const ROW_ID_MULTIHASH_CODE: u64 = 0x7801;
 /// The id of codec used for the [`RowId`] in `Cid`s.
 pub const ROW_ID_CODEC: u64 = 0x7800;
-
-/// Represents an EDS of a specific Height
-///
-/// # Note
-///
-/// EdsId is excluded from shwap operating on top of bitswap due to possible
-/// EDS sizes exceeding bitswap block limits.
-#[derive(Debug, PartialEq, Clone, Copy)]
-pub struct EdsId {
-    height: u64,
-}
 
 /// Represents particular row in a specific Data Square,
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -166,42 +153,6 @@ impl From<Row> for RawRow {
     }
 }
 
-impl EdsId {
-    pub fn new(height: u64) -> Result<Self> {
-        if height == 0 {
-            return Err(Error::ZeroBlockHeight);
-        }
-
-        Ok(EdsId { height })
-    }
-
-    /// A height of the block which contains the data.
-    pub fn block_height(&self) -> u64 {
-        self.height
-    }
-
-    pub fn encode(&self, bytes: &mut BytesMut) {
-        bytes.reserve(EDS_ID_SIZE);
-        bytes.put_u64(self.height);
-    }
-
-    pub fn decode(mut buffer: &[u8]) -> Result<Self, CidError> {
-        if buffer.len() != EDS_ID_SIZE {
-            // TODO: change error
-            return Err(CidError::InvalidMultihashLength(buffer.len()));
-        }
-
-        let height = buffer.get_u64();
-
-        if height == 0 {
-            return Err(CidError::InvalidCid("Zero block height".to_string()));
-        }
-
-        // TODO: use new after changing error type
-        Ok(EdsId { height })
-    }
-}
-
 impl RowId {
     /// Create a new [`RowId`] for the particular block.
     ///
@@ -217,7 +168,7 @@ impl RowId {
 
     /// A height of the block which contains the data.
     pub fn block_height(&self) -> u64 {
-        self.eds_id.height
+        self.eds_id.block_height()
     }
 
     /// An index of the row in the [`ExtendedDataSquare`].

@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use bytes::BytesMut;
 use celestia_proto::shwap::{Row as RawRow, Sample as RawSample};
 use celestia_types::eds::RawExtendedDataSquare;
-use celestia_types::row::{EDS_ID_SIZE, EdsId, ROW_ID_SIZE, Row, RowId};
+use celestia_types::row::{ROW_ID_SIZE, Row, RowId};
 use celestia_types::sample::{Sample, SampleId};
 use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use integer_encoding::VarInt;

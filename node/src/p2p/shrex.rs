@@ -2,9 +2,11 @@
 #![allow(unused)]
 
 use std::collections::{HashMap, HashSet};
+use std::fmt::Display;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use blockstore::block::CidError;
 use celestia_proto::shwap::{Row as RawRow, Sample as RawSample};
 use celestia_types::row::{Row, RowId};
 use celestia_types::sample::{Sample, SampleId};
@@ -35,6 +37,7 @@ use self::req_resp::ShrexBytesCodec;
 use crate::p2p::P2pError;
 use crate::peer_tracker::PeerTracker;
 use crate::store::Store;
+use crate::utils::OneshotResultSenderExt;
 use crate::utils::protocol_id;
 
 pub(crate) type Result<T, E = ShrExError> = std::result::Result<T, E>;
@@ -92,6 +95,26 @@ pub enum ShrExError {
 
     #[error("Invalid response")]
     InvalidResponse,
+
+    // TODO: After we remove bitswap, we need a more correct error than `CidError`
+    #[error("Failed to decode request: {0}")]
+    RequestDecodeFailed(String),
+
+    #[error("Failed to decode response: {0}")]
+    ResponseDecodeFailed(String),
+
+    #[error("Failed to verify response: {0}")]
+    ResponseVerificationFailed(celestia_types::Error),
+}
+
+impl ShrExError {
+    pub(crate) fn request_decode_failed(s: impl Display) -> ShrExError {
+        ShrExError::RequestDecodeFailed(s.to_string())
+    }
+
+    pub(crate) fn response_decode_failed(s: impl Display) -> ShrExError {
+        ShrExError::ResponseDecodeFailed(s.to_string())
+    }
 }
 
 impl<S> Behaviour<S>
@@ -124,11 +147,6 @@ where
         shrex_sub
             .subscribe(&gossipsub::IdentTopic::new(topic))
             .map_err(|e| P2pError::GossipsubInit(e.to_string()))?;
-
-        /*
-        let x = format!("{}/shrex/v0.1.0/sample_v0", config.network_id);
-        let x = libp2p::StreamProtocol::try_from_owned(x).expect("does not start from '/'");
-        */
 
         Ok(Self {
             inner: InnerBehaviour {
@@ -190,8 +208,10 @@ where
         index: u16,
         respond_to: oneshot::Sender<Result<Row, P2pError>>,
     ) {
-        let row_id = RowId::new(index, height).expect("todo");
-        self.client.row.send_request(row_id, respond_to);
+        match RowId::new(index, height) {
+            Ok(row_id) => self.client.row.send_request(row_id, respond_to),
+            Err(_) => respond_to.maybe_send_err(ShrExError::InvalidRequest),
+        }
     }
 
     pub(crate) fn get_sample(
@@ -201,8 +221,10 @@ where
         column_index: u16,
         respond_to: oneshot::Sender<Result<Sample, P2pError>>,
     ) {
-        let sample_id = SampleId::new(row_index, column_index, height).expect("todo");
-        self.client.sample.send_request(sample_id, respond_to);
+        match SampleId::new(row_index, column_index, height) {
+            Ok(sample_id) => self.client.sample.send_request(sample_id, respond_to),
+            Err(_) => respond_to.maybe_send_err(ShrExError::InvalidRequest),
+        }
     }
 }
 
