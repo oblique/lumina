@@ -2,9 +2,12 @@
 #![allow(unused)]
 
 use bytes::{Buf, BufMut, BytesMut};
-use celestia_proto::shwap::{Row as RawRow, Sample as RawSample};
+use celestia_proto::shwap::{
+    Row as RawRow, RowNamespaceData as RawRowNamespaceData, Sample as RawSample, Share as RawShare,
+};
 use celestia_types::consts::appconsts::SHARE_SIZE;
 use celestia_types::eds::{EdsId, ExtendedDataSquare};
+use celestia_types::namespace_data::{NamespaceData, NamespaceDataId};
 use celestia_types::row::{ROW_ID_SIZE, Row, RowId};
 use celestia_types::sample::{Sample, SampleId};
 use celestia_types::{DataAvailabilityHeader, ExtendedHeader};
@@ -171,5 +174,63 @@ impl ResponseCodec for ExtendedDataSquare {
         }
 
         Ok(eds)
+    }
+}
+
+impl RequestCodec for NamespaceDataId {
+    fn encode(&self) -> Vec<u8> {
+        let mut bytes = BytesMut::new();
+        self.encode(&mut bytes);
+        bytes.into()
+    }
+
+    fn decode(raw_data: &[u8]) -> Result<NamespaceDataId> {
+        NamespaceDataId::decode(raw_data).map_err(ShrExError::request_decode_failed)
+    }
+}
+
+impl ResponseCodec for NamespaceData {
+    type Request = NamespaceDataId;
+
+    fn encode(&self) -> Vec<u8> {
+        let mut bytes = BytesMut::new();
+
+        for row in self.rows() {
+            let raw_row = RawRowNamespaceData::from(row.to_owned());
+
+            let encoded_len = raw_row.encoded_len();
+            let varint_len = encoded_len.required_space();
+            bytes.reserve(varint_len + encoded_len);
+
+            raw_row
+                .encode_length_delimited(&mut bytes)
+                .expect("need more capacity");
+        }
+
+        bytes.into()
+    }
+
+    fn decode_and_verify(
+        mut raw_data: &[u8],
+        req: &NamespaceDataId,
+        header: &ExtendedHeader,
+    ) -> Result<NamespaceData> {
+        let mut raw_rows = Vec::new();
+
+        while !raw_data.is_empty() {
+            let raw_row = RawRowNamespaceData::decode_length_delimited(&mut raw_data)
+                .map_err(ShrExError::response_decode_failed)?;
+
+            raw_rows.push(raw_row);
+        }
+
+        let ns_data =
+            NamespaceData::from_raw(*req, raw_rows).map_err(ShrExError::response_decode_failed)?;
+
+        ns_data
+            .verify(*req, &header.dah)
+            .map_err(ShrExError::ResponseVerificationFailed)?;
+
+        Ok(ns_data)
     }
 }

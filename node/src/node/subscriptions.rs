@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use celestia_types::blob::BlobsAtHeight;
+use celestia_types::namespace_data::NamespaceData;
 use celestia_types::nmt::Namespace;
-use celestia_types::row_namespace_data::NamespaceData;
 use celestia_types::{Blob, ExtendedHeader, SharesAtHeight};
 use lumina_utils::executor::yield_now;
 use tokio::sync::broadcast::error::RecvError;
@@ -41,7 +41,10 @@ fn reconstruct_blobs(
     namespace_data: NamespaceData,
     header: &ExtendedHeader,
 ) -> Result<BlobsAtHeight, P2pError> {
-    let shares = namespace_data.rows.iter().flat_map(|row| row.shares.iter());
+    let shares = namespace_data
+        .rows()
+        .iter()
+        .flat_map(|row| row.shares.iter());
     let blobs = Blob::reconstruct_all(shares, header.app_version()?)?;
     Ok(BlobsAtHeight {
         height: header.height().into(),
@@ -249,7 +252,7 @@ pub(crate) async fn forward_new_shares<S: Store>(
             Ok(namespace_data) => Ok(SharesAtHeight {
                 height: header.height().into(),
                 shares: namespace_data
-                    .rows
+                    .into_inner()
                     .into_iter()
                     .flat_map(|row| row.shares.into_iter())
                     .collect(),

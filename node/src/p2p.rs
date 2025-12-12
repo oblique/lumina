@@ -23,9 +23,10 @@ use blockstore::Blockstore;
 use celestia_proto::p2p::pb::{HeaderRequest, header_request};
 use celestia_types::fraud_proof::BadEncodingFraudProof;
 use celestia_types::hash::Hash;
+use celestia_types::namespace_data::NamespaceData;
 use celestia_types::nmt::{Namespace, NamespacedSha2Hasher};
 use celestia_types::row::{Row, RowId};
-use celestia_types::row_namespace_data::{NamespaceData, RowNamespaceData, RowNamespaceDataId};
+use celestia_types::row_namespace_data::{RowNamespaceData, RowNamespaceDataId};
 use celestia_types::sample::{Sample, SampleId};
 use celestia_types::{Blob, ExtendedHeader, FraudProof};
 use cid::Cid;
@@ -627,7 +628,7 @@ impl P2p {
             Err(e) => return Err(e),
         };
 
-        Ok(NamespaceData { rows })
+        Ok(NamespaceData::new(rows))
     }
 
     /// Request all blobs with provided namespace in the block corresponding to this header
@@ -659,7 +660,10 @@ impl P2p {
             .get_namespace_data(namespace, &header, timeout, store)
             .await?;
 
-        let shares = namespace_data.rows.iter().flat_map(|row| row.shares.iter());
+        let shares = namespace_data
+            .rows()
+            .iter()
+            .flat_map(|row| row.shares.iter());
 
         Ok(Blob::reconstruct_all(shares, header.app_version()?)?)
     }

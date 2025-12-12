@@ -14,12 +14,12 @@ use multihash::Multihash;
 use prost::Message;
 use serde::{Deserialize, Serialize};
 
-use crate::nmt::{Namespace, NamespaceProof};
+use crate::nmt::{NS_SIZE, Namespace, NamespaceProof};
 use crate::row::{ROW_ID_SIZE, RowId};
 use crate::{DataAvailabilityHeader, Error, Result, Share, bail_validation};
 
 /// Number of bytes needed to represent [`RowNamespaceDataId`] in `multihash`.
-const ROW_NAMESPACE_DATA_ID_SIZE: usize = 39;
+pub const ROW_NAMESPACE_DATA_ID_SIZE: usize = ROW_ID_SIZE + NS_SIZE;
 /// The code of the [`RowNamespaceDataId`] hashing algorithm in `multihash`.
 pub const ROW_NAMESPACE_DATA_ID_MULTIHASH_CODE: u64 = 0x7821;
 /// The id of codec used for the [`RowNamespaceDataId`] in `Cid`s.
@@ -149,16 +149,6 @@ impl RowNamespaceData {
     }
 }
 
-/// A collection of rows of [`Share`]s from a particular [`Namespace`].
-///
-/// [`Share`]: crate::Share
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct NamespaceData {
-    /// All rows containing shares within some namespace.
-    pub rows: Vec<RowNamespaceData>,
-}
-
 impl From<RowNamespaceData> for RawRowNamespaceData {
     fn from(namespaced_data: RowNamespaceData) -> RawRowNamespaceData {
         RawRowNamespaceData {
@@ -197,10 +187,6 @@ impl RowNamespaceDataId {
     /// This function will return an error if the block height
     /// or row index is invalid.
     pub fn new(namespace: Namespace, row_index: u16, block_height: u64) -> Result<Self> {
-        if block_height == 0 {
-            return Err(Error::ZeroBlockHeight);
-        }
-
         Ok(Self {
             row_id: RowId::new(row_index, block_height)?,
             namespace,
@@ -226,13 +212,13 @@ impl RowNamespaceDataId {
         self.namespace
     }
 
-    fn encode(&self, bytes: &mut BytesMut) {
+    pub fn encode(&self, bytes: &mut BytesMut) {
         bytes.reserve(ROW_NAMESPACE_DATA_ID_SIZE);
         self.row_id.encode(bytes);
         bytes.put(self.namespace.as_bytes());
     }
 
-    fn decode(buffer: &[u8]) -> Result<Self, CidError> {
+    pub fn decode(buffer: &[u8]) -> Result<Self, CidError> {
         if buffer.len() != ROW_NAMESPACE_DATA_ID_SIZE {
             return Err(CidError::InvalidMultihashLength(buffer.len()));
         }
