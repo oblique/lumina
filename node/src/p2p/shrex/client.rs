@@ -5,6 +5,8 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use celestia_proto::shwap::{Row as RawRow, Sample as RawSample};
+use celestia_types::eds::{EdsId, ExtendedDataSquare};
+use celestia_types::namespace_data::{NamespaceData, NamespaceDataId};
 use celestia_types::row::{Row, RowId};
 use celestia_types::sample::{Sample, SampleId};
 use libp2p::PeerId;
@@ -26,8 +28,17 @@ const MAX_PEERS: usize = 10;
 const SCHEDULE_PENDING_INTERVAL: Duration = Duration::from_millis(100);
 
 pub(super) struct Client {
+    // WARNING!: When you add a new `ClientEndpoint` here, you need to adjust the
+    // following methods:
+    //
+    // * Client::has_pending_requests
+    // * Client::schedule_pending_requests
+    // * Client::on_stop
+    // * shrex::Behaviour::on_to_swarm
     pub(super) row: ClientEndpoint<RowId, Row>,
     pub(super) sample: ClientEndpoint<SampleId, Sample>,
+    pub(super) nd: ClientEndpoint<NamespaceDataId, NamespaceData>,
+    pub(super) eds: ClientEndpoint<EdsId, ExtendedDataSquare>,
     schedule_pending_interval: Option<Interval>,
 }
 
@@ -36,12 +47,17 @@ impl Client {
         Client {
             row: ClientEndpoint::new(),
             sample: ClientEndpoint::new(),
+            nd: ClientEndpoint::new(),
+            eds: ClientEndpoint::new(),
             schedule_pending_interval: None,
         }
     }
 
     fn has_pending_requests(&self) -> bool {
-        self.row.has_pending_requests() || self.sample.has_pending_requests()
+        self.row.has_pending_requests()
+            || self.sample.has_pending_requests()
+            || self.nd.has_pending_requests()
+            || self.eds.has_pending_requests()
     }
 
     pub(super) fn schedule_pending_requests(
@@ -53,11 +69,17 @@ impl Client {
             .schedule_pending_requests(&mut behaviour.row_req_resp, peer_tracker);
         self.sample
             .schedule_pending_requests(&mut behaviour.sample_req_resp, peer_tracker);
+        self.nd
+            .schedule_pending_requests(&mut behaviour.nd_req_resp, peer_tracker);
+        self.eds
+            .schedule_pending_requests(&mut behaviour.nd_req_resp, peer_tracker);
     }
 
     pub(super) fn on_stop(&mut self) {
         self.row.on_stop();
         self.sample.on_stop();
+        self.nd.on_stop();
+        self.eds.on_stop();
     }
 
     pub(super) fn poll(&mut self, cx: &mut Context<'_>) -> Poll<Event> {

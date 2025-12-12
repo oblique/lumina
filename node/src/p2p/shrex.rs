@@ -71,6 +71,8 @@ pub(crate) struct InnerBehaviour {
     shrex_sub: gossipsub::Behaviour,
     row_req_resp: request_response::Behaviour<ShrexBytesCodec>,
     sample_req_resp: request_response::Behaviour<ShrexBytesCodec>,
+    nd_req_resp: request_response::Behaviour<ShrexBytesCodec>,
+    eds_req_resp: request_response::Behaviour<ShrexBytesCodec>,
 }
 
 #[derive(Debug)]
@@ -165,6 +167,20 @@ where
                     )],
                     request_response::Config::default(),
                 ),
+                nd_req_resp: request_response::Behaviour::new(
+                    [(
+                        protocol_id(config.network_id, "/shrex/v0.1.0/nd_v0"),
+                        ProtocolSupport::Outbound,
+                    )],
+                    request_response::Config::default(),
+                ),
+                eds_req_resp: request_response::Behaviour::new(
+                    [(
+                        protocol_id(config.network_id, "/shrex/v0.1.0/eds_v0"),
+                        ProtocolSupport::Outbound,
+                    )],
+                    request_response::Config::default(),
+                ),
             },
             client: Client::new(),
             _da_pools: HashMap::new(),
@@ -187,6 +203,14 @@ where
             }
             ToSwarm::GenerateEvent(InnerBehaviourEvent::SampleReqResp(ev)) => {
                 self.client.sample.on_event(ev);
+                None
+            }
+            ToSwarm::GenerateEvent(InnerBehaviourEvent::NdReqResp(ev)) => {
+                self.client.nd.on_event(ev);
+                None
+            }
+            ToSwarm::GenerateEvent(InnerBehaviourEvent::EdsReqResp(ev)) => {
+                self.client.eds.on_event(ev);
                 None
             }
             _ => Some(ev.map_out(|_| unreachable!("GenerateEvent handled"))),
