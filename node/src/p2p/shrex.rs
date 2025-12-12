@@ -8,6 +8,9 @@ use std::task::{Context, Poll};
 
 use blockstore::block::CidError;
 use celestia_proto::shwap::{Row as RawRow, Sample as RawSample};
+use celestia_types::eds::{EdsId, ExtendedDataSquare};
+use celestia_types::namespace_data::{NamespaceData, NamespaceDataId};
+use celestia_types::nmt::Namespace;
 use celestia_types::row::{Row, RowId};
 use celestia_types::sample::{Sample, SampleId};
 use futures::AsyncWrite;
@@ -247,6 +250,29 @@ where
     ) {
         match SampleId::new(row_index, column_index, height) {
             Ok(sample_id) => self.client.sample.send_request(sample_id, respond_to),
+            Err(_) => respond_to.maybe_send_err(ShrExError::InvalidRequest),
+        }
+    }
+
+    pub(crate) fn get_namespace_data(
+        &mut self,
+        height: u64,
+        namespace: Namespace,
+        respond_to: oneshot::Sender<Result<NamespaceData, P2pError>>,
+    ) {
+        match NamespaceDataId::new(namespace, height) {
+            Ok(nd_id) => self.client.nd.send_request(nd_id, respond_to),
+            Err(_) => respond_to.maybe_send_err(ShrExError::InvalidRequest),
+        }
+    }
+
+    pub(crate) fn get_eds(
+        &mut self,
+        height: u64,
+        respond_to: oneshot::Sender<Result<ExtendedDataSquare, P2pError>>,
+    ) {
+        match EdsId::new(height) {
+            Ok(eds_id) => self.client.eds.send_request(eds_id, respond_to),
             Err(_) => respond_to.maybe_send_err(ShrExError::InvalidRequest),
         }
     }

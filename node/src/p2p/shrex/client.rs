@@ -289,19 +289,3 @@ pub(super) trait ClientEndpointHandler {
         peer_tracker: &PeerTracker,
     );
 }
-
-pub(super) trait FromRawResponse<TReq, TRawResp>: Sized {
-    fn from_raw_response(req: TReq, raw_resp: TRawResp) -> Self;
-}
-
-impl FromRawResponse<RowId, RawRow> for Row {
-    fn from_raw_response(req: RowId, raw_resp: RawRow) -> Row {
-        Row::from_raw(req, raw_resp).expect("todo")
-    }
-}
-
-impl FromRawResponse<SampleId, RawSample> for Sample {
-    fn from_raw_response(req: SampleId, raw_resp: RawSample) -> Sample {
-        Sample::from_raw(req, raw_resp).expect("todo")
-    }
-}
